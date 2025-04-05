@@ -18,6 +18,8 @@ class EmployeeResponse(EmployeeCreate):
 class AttendanceCreate(BaseModel):
     employee_id: int
     employee_name: str
+    # The line `image_path: Optional[str] = None` in the `AttendanceCreate` schema is defining a field
+    # named `image_path` that can hold a string value or be `None`.
     image_path: Optional[str] = None
 
 #Schema for Attendance response

@@ -28,3 +28,7 @@ def get_attendance_by_date(db: Session, date: str):
     start_of_day = datetime.combine(date, datetime.min.time())
     end_of_day = datetime.combine(date, datetime.max.time())
     return db.query(Attendance).filter(Attendance.time_in.between(start_of_day, end_of_day)).all()
+
+# Get All Employees
+def get_all_employees(db: Session):
+    return db.query(Employee).all()

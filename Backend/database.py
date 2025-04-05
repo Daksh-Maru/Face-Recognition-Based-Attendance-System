@@ -15,7 +15,7 @@ engine = create_engine(DATABASE_URL)
 
 
 # Session to interact with DB
-SessionLocal = sessionmaker(autocomit=False, autoflush=False, bind=engine)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Base class for ORM models
 Base = declarative_base()

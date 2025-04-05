@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 import crud, schema, database
+from typing import List
 
 router = APIRouter()
 
@@ -26,3 +27,8 @@ def get_employee(employee_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Employee not found")
     return db_employee
 
+# Get all employees
+@router.get("/employees/", response_model=List[schema.EmployeeResponse])
+def get_all_employees(db: Session = Depends(get_db)):
+    db_employees = crud.get_all_employees(db)
+    return db_employees

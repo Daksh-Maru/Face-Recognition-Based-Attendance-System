@@ -1,5 +1,5 @@
 # Ignore virtual environment
-venv/
+.venv/
 
 # Ignore compiled Python files
 __pycache__/
@@ -19,3 +19,5 @@ __pycache__/
 
 # Ignore MacOS system files
 .DS_Store
+
+

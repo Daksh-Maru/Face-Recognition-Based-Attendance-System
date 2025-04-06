@@ -12,9 +12,9 @@ app = FastAPI(
 )
 
 # Include routers (with optional prefixes)
-app.include_router(employees.router, prefix="/api")
-app.include_router(attendance.router, prefix="/api")
-app.include_router(recognize.router, prefix="/api")
+app.include_router(employees.router)
+app.include_router(attendance.router)
+# app.include_router(recognize.router)
 
 @app.get("/")
 def root():

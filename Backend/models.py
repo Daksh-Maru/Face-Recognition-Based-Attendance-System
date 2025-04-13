@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, func, LargeBinary
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -9,12 +9,13 @@ class Employee(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False)
+    # face_embedding = Column(LargeBinary, nullable=True) 
     attendances = relationship("Attendance", back_populates="employee", cascade="all, delete")
 
 
 class Attendance(Base):
     __tablename__ = 'attendance'
-
+    
     id = Column(Integer, primary_key=True, index=True)
     employee_id = Column(Integer, ForeignKey('employees.id'), nullable=False)
     employee_name = Column(String, nullable=False)

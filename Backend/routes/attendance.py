@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 from database import get_db 
 
-router = APIRouter()
+router = APIRouter(tags=["Attendance"])
 
 # Load precomputed embeddings
 # with open("assets/embeddings.pkl", "rb") as f:

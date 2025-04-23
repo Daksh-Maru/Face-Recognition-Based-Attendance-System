@@ -13,6 +13,7 @@ router = APIRouter(tags=["Attendance"])
 
 # Load precomputed embeddings
 # with open("assets/embeddings.pkl", "rb") as f:
+
 #     stored_embeddings = pickle.load(f)
 
 # @router.post("/attendance/recognize", response_model=schema.AttendanceResponse)

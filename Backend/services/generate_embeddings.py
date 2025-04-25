@@ -60,6 +60,6 @@ def save_embeddings(dataset_path: str, pkl_output_path: str = "assets/embeddings
 # save_embeddings("dataset/")  # Replace with your dataset folder path
 
 if __name__ == "__main__":
-    save_embeddings('dataset', pkl_output_path="assets/embeddings.pkl")
+    save_embeddings("../dataset", pkl_output_path="../assets/embeddings.pkl")
 
 

@@ -1,67 +1,64 @@
 import cv2
+from PIL import Image
+import numpy as np
 import requests
 import os
-import time
-#import generate_embeddings  # ← Make sure it's importable
+from datetime import datetime
+from io import BytesIO
 
 API_URL = "http://localhost:8000/recognize"
-DATASET_PATH = "dataset"
-EMBEDDING_PATH = "assets/embeddings.pkl"
+DATASET_DIR = "dataset"  # Save processed images here
+
+# Ensure dataset dir exists
+os.makedirs(DATASET_DIR, exist_ok=True)
 
 cap = cv2.VideoCapture(0)
 
-if not cap.isOpened():
-    print("❌ Cannot open webcam.")
-    exit()
-
-print("🎥 Press 'r' to recognize. Press 'q' to quit.")
+def preprocess_for_facenet(frame):
+    # Convert BGR (OpenCV) to RGB (FaceNet)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    resized = cv2.resize(rgb, (160, 160))
+    return Image.fromarray(resized), resized  # PIL image & NumPy array
 
 while True:
     ret, frame = cap.read()
     if not ret:
-        print("❌ Failed to grab frame.")
         break
 
-    cv2.imshow("Face Recognition", frame)
-    key = cv2.waitKey(1)
+    cv2.imshow("Press 'r' to recognize, 'q' to quit", frame)
+    key = cv2.waitKey(1) & 0xFF
 
     if key == ord('r'):
-        # Encode and send to API
-        _, img_encoded = cv2.imencode('.jpg', frame)
+        pil_img, img_np = preprocess_for_facenet(frame)
+
+        # Send image to FastAPI
+        img_byte_arr = BytesIO()
+        pil_img.save(img_byte_arr, format='JPEG')
+        img_byte_arr = img_byte_arr.getvalue()
+
         response = requests.post(API_URL, files={
-            "file": ("webcam.jpg", img_encoded.tobytes(), "image/jpeg")
+            "file": ("frame.jpg", img_byte_arr, "image/jpeg")
         })
 
         try:
-            result = response.json()
-            identity = result.get("identity", "Unknown")
-            print(f"🔎 Recognized: {identity}")
+            identity = response.json().get("identity", "Unknown")
+            print(f"✅ Recognized: {identity}")
 
-            timestamp = int(time.time())
+            # Create subfolder if it doesn't exist
+            person_folder = os.path.join(DATASET_DIR, identity)
+            os.makedirs(person_folder, exist_ok=True)
 
-            if identity == "Unknown":
-                name = input("📝 Enter name of new person: ").strip()
-                folder = os.path.join(DATASET_PATH, name)
-                os.makedirs(folder, exist_ok=True)
+            # Save processed image
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{identity}_{timestamp}.jpg"
+            filepath = os.path.join(person_folder, filename)
 
-                save_path = os.path.join(folder, f"{name}_{timestamp}.jpg")
-                cv2.imwrite(save_path, frame)
-                print(f"📁 Saved new face to: {save_path}")
-
-            else:
-                folder = os.path.join(DATASET_PATH, identity)
-                os.makedirs(folder, exist_ok=True)
-                save_path = os.path.join(folder, f"{identity}_{timestamp}.jpg")
-                cv2.imwrite(save_path, frame)
-                print(f"📸 Added image for {identity} at: {save_path}")
-
-            # 🔁 Regenerate embeddings
-            #print("🧠 Updating embeddings...")
-            #generate_embeddings.save_embeddings(DATASET_PATH, EMBEDDING_PATH)
-            #print("✅ Embeddings updated successfully.")
+            # Save as RGB → BGR for OpenCV
+            cv2.imwrite(filepath, cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR))
+            print(f"📁 Image saved to: {filepath}")
 
         except Exception as e:
-            print("❌ Recognition failed:", e)
+            print("❌ Error during recognition:", e)
 
     elif key == ord('q'):
         break

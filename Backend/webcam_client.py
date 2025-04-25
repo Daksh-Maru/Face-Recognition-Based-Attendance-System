@@ -1,24 +1,23 @@
 import cv2
-from PIL import Image
 import numpy as np
 import requests
 import os
 from datetime import datetime
 from io import BytesIO
+import sys
+
+# ✅ Include backend path
+sys.path.append("Backend")  # Update path to match your structure
+
+# ✅ Import your own detection and preprocessing functions
+from services.detection import detect_face
+from services.utils import preprocess_face
 
 API_URL = "http://localhost:8000/recognize"
-DATASET_DIR = "dataset"  # Save processed images here
+DATASET_DIR = "dataset"
 
-# Ensure dataset dir exists
 os.makedirs(DATASET_DIR, exist_ok=True)
-
 cap = cv2.VideoCapture(0)
-
-def preprocess_for_facenet(frame):
-    # Convert BGR (OpenCV) to RGB (FaceNet)
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    resized = cv2.resize(rgb, (160, 160))
-    return Image.fromarray(resized), resized  # PIL image & NumPy array
 
 while True:
     ret, frame = cap.read()
@@ -29,36 +28,54 @@ while True:
     key = cv2.waitKey(1) & 0xFF
 
     if key == ord('r'):
-        pil_img, img_np = preprocess_for_facenet(frame)
-
-        # Send image to FastAPI
-        img_byte_arr = BytesIO()
-        pil_img.save(img_byte_arr, format='JPEG')
-        img_byte_arr = img_byte_arr.getvalue()
+        # Encode full frame and send to API
+        _, img_encoded = cv2.imencode('.jpg', frame)
+        img_bytes = img_encoded.tobytes()
 
         response = requests.post(API_URL, files={
-            "file": ("frame.jpg", img_byte_arr, "image/jpeg")
+            "file": ("frame.jpg", img_bytes, "image/jpeg")
         })
 
         try:
             identity = response.json().get("identity", "Unknown")
-            print(f"✅ Recognized: {identity}")
+            print(f"🧠 Recognized: {identity}")
 
-            # Create subfolder if it doesn't exist
+            # Detect face locally for saving
+            face = detect_face(frame)
+
+            if face is None:
+                print("⚠️ No face detected locally. Skipping save.")
+                continue
+
+            # Ask for new employee if unknown
+            if identity == "Unknown":
+                register = input("❓ Unknown face detected. Register this person? (y/n): ").strip().lower()
+                if register == 'y':
+                    identity = input("👤 Enter the new employee name: ").strip()
+                else:
+                    print("⛔ Skipping image save.")
+                    continue
+
+            # Preprocess face using your logic
+            processed_np = preprocess_face(face)
+
+            # Normalize float image to 0-255 for saving
+            normalized_img = ((processed_np - processed_np.min()) / (processed_np.max() - processed_np.min()) * 255).astype(np.uint8)
+
+            # Create folder if doesn't exist
             person_folder = os.path.join(DATASET_DIR, identity)
             os.makedirs(person_folder, exist_ok=True)
 
-            # Save processed image
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{identity}_{timestamp}.jpg"
             filepath = os.path.join(person_folder, filename)
 
-            # Save as RGB → BGR for OpenCV
-            cv2.imwrite(filepath, cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR))
-            print(f"📁 Image saved to: {filepath}")
+            # Save image (convert RGB to BGR for OpenCV)
+            cv2.imwrite(filepath, cv2.cvtColor(normalized_img, cv2.COLOR_RGB2BGR))
+            print(f"✅ Saved preprocessed image to: {filepath}")
 
         except Exception as e:
-            print("❌ Error during recognition:", e)
+            print("❌ Error:", e)
 
     elif key == ord('q'):
         break

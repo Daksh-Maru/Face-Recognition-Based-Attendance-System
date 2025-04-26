@@ -53,7 +53,7 @@ def predict_face(embedding, stored_embeddings):
 
     for label, db_emb in stored_embeddings.items():
         dist = np.linalg.norm(embedding - db_emb)
-        if dist < min_dist and dist < 1.0:
+        if dist < min_dist and dist < 0.8:
             min_dist = dist
             identity = label
     return identity

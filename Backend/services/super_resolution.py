@@ -60,4 +60,24 @@ class SuperResolution:
         Returns:
             Super-resolved image
         """
-        return self.sr.upsample(image)
+        # Check if image is empty
+        if image is None or image.size == 0:
+            raise ValueError("Input image is empty or None")
+
+        # Convert to the expected format if needed
+        # The error suggests the model expects 2D input
+        # Try splitting channels and processing separately
+        if len(image.shape) == 3:
+            # Split channels
+            b, g, r = cv2.split(image)
+
+            # Process each channel
+            b_sr = self.sr.upsample(b)
+            g_sr = self.sr.upsample(g)
+            r_sr = self.sr.upsample(r)
+
+            # Merge channels back
+            return cv2.merge([b_sr, g_sr, r_sr])
+        else:
+            return self.sr.upsample(image)
+

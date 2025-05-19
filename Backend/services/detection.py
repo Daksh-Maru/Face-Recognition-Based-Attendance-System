@@ -4,7 +4,8 @@ from ultralytics import YOLO
 import os
 import cv2
 import numpy as np
-from .super_resolution import SuperResolution
+from super_resolution import SuperResolution
+from preprocessing import handle_occlusions
 
 # Get absolute path to yolov8n-face.pt
 model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../assets/yolov8n-face.pt"))
@@ -25,30 +26,33 @@ def detect_face(image, apply_sr=True):
     Returns:
         Cropped face image or None if no face detected
     """
-    # Convert to BGR for OpenCV processing
+
+
     img_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-    # Apply super-resolution if requested
+# Apply super-resolution if requested
     if apply_sr:
         img_bgr = sr_model.upsample(img_bgr)
 
-    # Detect faces
+# Detect faces
     results = yolo_model.predict(img_bgr, conf=0.2, verbose=False)
 
-    # Extract face bounding boxes
+# Extract face bounding boxes
     faces = results[0].boxes.xyxy.cpu().numpy() if len(results) > 0 else []
 
     if len(faces) == 0:
-        return None
+        return None, None
 
-    # Select the largest face
-    largest_face = max(faces, key=lambda box: (box[2] - box[0]) * (box[3] - box[1]))
+# Select the largest face
+    largest_face = max(faces, key=lambda box: (box - box) * (box - box))
     x1, y1, x2, y2 = map(int, largest_face)
 
-    # Convert back to RGB for further processing
+# Convert back to RGB for further processing
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-    # Extract face region
+# Extract face region
     face_img = img_rgb[y1:y2, x1:x2]
 
-    return face_img
+# Apply occlusion handling
+    enhanced_face, occlusion_mask = handle_occlusions(face_img)
+    return enhanced_face, occlusion_mask

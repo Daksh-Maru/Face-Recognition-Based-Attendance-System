@@ -5,7 +5,7 @@ from super_resolution import SuperResolution
 
 def test_super_resolution():
     # Load a test image
-    img_path = "../dataset/Aaron_Eckhart/Aaron_Eckhart_0001.jpg"
+    img_path = "../dataset/Sarthak/WIN_20250518_13_46_51_Pro.jpg"
     img = cv2.imread(img_path)
 
     # Initialize super-resolution model

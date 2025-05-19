@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 import os
-
+from occlusion_detection import OcclusionDetector, extract_selective_lgbphs
 
 # Super-resolution model class
 class SuperResolution:
@@ -22,7 +22,7 @@ class SuperResolution:
         # Model file paths based on architecture and scale
         model_files = {
             "espcn": f"ESPCN_x{scale}.pb"
-        }  #
+        }
 
         self.model_path = os.path.join(models_dir, model_files[model_name])
 
@@ -82,6 +82,44 @@ def apply_super_resolution(image):
         # Grayscale image
         return sr_model.upsample(image)
 
+
+def handle_occlusions(face_img):
+    """
+    Detect and handle occlusions in face image
+    Returns: enhanced face image, occlusion mask
+    """
+    # First apply your existing enhancements
+    enhanced_face = enhance_image(face_img)
+
+    # Load occlusion detector if available
+    occlusion_detector = None
+    model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../assets/occlusion_models.pkl"))
+    if os.path.exists(model_path):
+        occlusion_detector = OcclusionDetector(model_path=model_path)
+        # Create occlusion mask
+        occlusion_mask = occlusion_detector.create_occlusion_mask(enhanced_face)
+    else:
+        # If no occlusion detector, create a dummy mask (all zeros = no occlusion)
+        occlusion_mask = np.zeros((enhanced_face.shape[0], enhanced_face.shape[1]), dtype=np.uint8)
+
+    return enhanced_face, occlusion_mask
+
+
+def preprocess_image_with_occlusion_handling(image):
+    """
+    Complete preprocessing pipeline with occlusion handling
+    Returns: preprocessed image, occlusion mask
+    """
+    # Apply your existing enhancements
+    enhanced_img = enhance_image(image)
+
+    # Handle occlusions
+    _, occlusion_mask = handle_occlusions(enhanced_img)
+
+    # Apply your standard preprocessing
+    preprocessed = adaptive_enhance(enhanced_img)
+
+    return preprocessed, occlusion_mask
 
 def apply_hist_eq(image):
     """

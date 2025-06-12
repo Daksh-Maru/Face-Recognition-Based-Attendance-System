@@ -1,476 +1,470 @@
 import cv2
 import numpy as np
 import logging
-import mediapipe as mp
-from sklearn.decomposition import PCA
-import joblib
+from typing import Optional, Tuple, Dict, Union
 import time
-import threading
-from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
-import os
 
+# Setup logging
 logger = logging.getLogger(__name__)
 
-# Updated Enterprise Configuration with Very Lenient Quality Requirements
-ENTERPRISE_CONFIG = {
-    'webcam': {
-        'min_face_size': (60, 60),      # Reduced for better acceptance
-        'clahe_clip': 1.5,              # Reduced for less aggressive enhancement
-        'denoise_strength': 2,          # Reduced for speed
-        'sharpening_kernel': np.array([[-0.05, -0.05, -0.05],
-                                     [-0.05, 1.2, -0.05],
-                                     [-0.05, -0.05, -0.05]]),  # Lighter sharpening
-    },
-    'cctv': {
-        'min_face_size': (40, 40),      # Very small minimum
-        'brightness_threshold': 40,      # Lower threshold
-        'max_enhance': 1.8              # Increased enhancement
-    },
-    'occlusion': {
-        'cnn_threshold': 0.7,           # Higher threshold (more lenient)
-        'gabor_threshold': 0.4,         # Higher threshold
-        'temporal_window': 6,           # Reduced for memory
-        'max_occlusion_allowed': 0.7    # More lenient
-    },
-    'quality': {
-        'min_focus': 8,                 # Much more lenient
-        'contrast_threshold': 8,        # Much lower
-        'brightness_range': (10, 250)   # Very wide range
-    },
-    'performance': {
-        'batch_size': 16,
-        'cache_size': 300,
-        'num_threads': 4,
-        'enable_monitoring': True
-    }
-}
 
-class PreprocessingMonitor:
-    """Enterprise preprocessing performance monitoring"""
+class ImagePreprocessor:
+    """
+    Optimized image preprocessing for face recognition systems
+    Compatible with LFW and standard datasets
+    """
 
-    def __init__(self):
-        self.metrics = {
-            'total_processed': 0,
-            'successful_processed': 0,
-            'avg_processing_time': 0.0,
-            'quality_failures': 0,
-            'occlusion_detections': 0,
-            'alignment_failures': 0
+    def __init__(self, adaptive_mode: bool = True):
+        """
+        Initialize preprocessor with configurable parameters
+
+        Args:
+            adaptive_mode: Enable adaptive enhancement based on image quality
+        """
+        self.adaptive_mode = adaptive_mode
+
+        # Optimized parameters for face recognition
+        self.clahe_params = {
+            'clipLimit': 1.5,  # Reduced from 2.0 for gentler enhancement
+            'tileGridSize': (6, 6)  # Smaller tiles for better local adaptation
         }
-        self.lock = threading.Lock()
 
-    def record_processing(self, success, processing_time, quality_pass=True, occluded=False, aligned=True):
-        with self.lock:
-            self.metrics['total_processed'] += 1
-            if success:
-                self.metrics['successful_processed'] += 1
+        self.bilateral_params = {
+            'd': 7,  # Reduced from 9 for better detail preservation
+            'sigmaColor': 50,  # Reduced from 75
+            'sigmaSpace': 50  # Reduced from 75
+        }
 
-            self.metrics['avg_processing_time'] = (
-                (self.metrics['avg_processing_time'] * (self.metrics['total_processed'] - 1) + processing_time)
-                / self.metrics['total_processed']
-            )
+        # Adaptive sharpening kernel (gentler than original)
+        self.sharpen_kernel = np.array([
+            [0, -0.5, 0],
+            [-0.5, 3, -0.5],
+            [0, -0.5, 0]
+        ])
 
-            if not quality_pass:
-                self.metrics['quality_failures'] += 1
-            if occluded:
-                self.metrics['occlusion_detections'] += 1
-            if not aligned:
-                self.metrics['alignment_failures'] += 1
+    def assess_image_quality(self, image: np.ndarray) -> Dict[str, float]:
+        """
+        Assess image quality metrics for adaptive processing
 
-preprocessing_monitor = PreprocessingMonitor()
+        Args:
+            image: Input RGB image
 
-class EnterpriseOcclusionValidator:
-    """Enterprise-grade occlusion detection with very lenient validation"""
-
-    def __init__(self):
-        self.gabor_bank = self._create_gabor_filters()
-        self.pca = None
-        self.clf = None
-        self.executor = ThreadPoolExecutor(max_workers=2)
-        self._load_models()
-
-    def _create_gabor_filters(self):
-        """Optimized Gabor filter bank"""
-        filters = []
-        # Reduced filter count for performance
-        for theta in np.arange(0, np.pi, np.pi / 3):  # 3 orientations
-            for sigma in (2, 4):
-                kern = cv2.getGaborKernel((13, 13), sigma, theta, 8, 0.5)
-                filters.append(kern)
-        return filters
-
-    def _load_models(self):
-        """Load pre-trained models with error handling"""
+        Returns:
+            Dictionary containing quality metrics
+        """
         try:
-            if os.path.exists('assets/occlusion_cnn.pkl'):
-                self.clf = joblib.load('assets/occlusion_cnn.pkl')
-                logger.info("✅ Occlusion CNN model loaded")
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
-            if os.path.exists('assets/occlusion_pca.pkl'):
-                self.pca = joblib.load('assets/occlusion_pca.pkl')
-                logger.info("✅ Occlusion PCA model loaded")
-
-        except Exception as e:
-            logger.warning(f"Model loading failed: {e}")
-
-    def validate(self, face_img):
-        """Very lenient occlusion validation"""
-        try:
-            if face_img is None or face_img.size == 0:
-                return False
-
-            # Fast heuristic check first with lenient threshold
-            if self._fast_heuristic_check(face_img):
-                return True
-
-            # More lenient fallback checks
-            return self._lenient_brightness_validation(face_img)
-
-        except Exception as e:
-            logger.error(f"Occlusion validation failed: {e}")
-            return False  # Default to no occlusion
-
-    def _fast_heuristic_check(self, face_img):
-        """Very lenient brightness-based occlusion check"""
-        try:
-            if len(face_img.shape) == 3:
-                gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = face_img
-
-            upper_region = gray[:gray.shape[0] // 3, :]
-            return np.mean(upper_region) < 25  # Very dark threshold
-        except:
-            return False
-
-    def _lenient_brightness_validation(self, face_img):
-        """Very lenient brightness-based validation"""
-        try:
-            if len(face_img.shape) == 3:
-                gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = face_img
-
-            upper = gray[:gray.shape[0] // 2, :]
-            return np.mean(upper) < 30  # Very lenient threshold
-        except:
-            return False
-
-class EnterprisePreprocessor:
-    """Enterprise-grade preprocessing system with lenient quality standards"""
-
-    def __init__(self):
-        self.occlusion_validator = EnterpriseOcclusionValidator()
-        try:
-            self.face_mesh = mp.solutions.face_mesh.FaceMesh(
-                static_image_mode=False,
-                max_num_faces=1,
-                refine_landmarks=False,
-                min_detection_confidence=0.4,  # Very lenient
-                min_tracking_confidence=0.3
-            )
-        except Exception as e:
-            logger.warning(f"MediaPipe initialization failed: {e}")
-            self.face_mesh = None
-
-        self.executor = ThreadPoolExecutor(max_workers=ENTERPRISE_CONFIG['performance']['num_threads'])
-
-    def enhance_image_enterprise(self, image, is_webcam=False):
-        """Minimal enhancement to preserve image quality"""
-        start_time = time.time()
-
-        try:
-            if image is None or image.size == 0:
-                return image
-
-            # Ensure image is in correct format
-            if len(image.shape) != 3:
-                logger.warning("Image is not 3-channel, returning as-is")
-                return image
-
-            if is_webcam:
-                # Very light webcam processing
-                try:
-                    lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
-                    l, a, b = cv2.split(lab)
-
-                    # Light CLAHE enhancement
-                    clahe = cv2.createCLAHE(
-                        clipLimit=ENTERPRISE_CONFIG['webcam']['clahe_clip'],
-                        tileGridSize=(6, 6)
-                    )
-                    l_enhanced = clahe.apply(l)
-                    enhanced = cv2.merge([l_enhanced, a, b])
-                    enhanced = cv2.cvtColor(enhanced, cv2.COLOR_LAB2RGB)
-
-                    # Skip denoising for speed
-                    enhanced = np.clip(enhanced, 0, 255).astype(np.uint8)
-                    return enhanced
-
-                except Exception as e:
-                    logger.warning(f"Webcam enhancement failed: {e}, using original")
-                    return image
-            else:
-                # Minimal CCTV processing
-                try:
-                    brightness = np.mean(image)
-                    if brightness < ENTERPRISE_CONFIG['cctv']['brightness_threshold']:
-                        enhanced = cv2.convertScaleAbs(
-                            image,
-                            alpha=ENTERPRISE_CONFIG['cctv']['max_enhance'],
-                            beta=10
-                        )
-                        return enhanced
-                    return image
-                except Exception as e:
-                    logger.warning(f"CCTV enhancement failed: {e}")
-                    return image
-
-        except Exception as e:
-            logger.error(f"Enhancement failed: {e}")
-            return image
-        finally:
-            if ENTERPRISE_CONFIG['performance']['enable_monitoring']:
-                preprocessing_monitor.record_processing(
-                    True, time.time() - start_time
-                )
-
-    def align_face_enterprise(self, face_img):
-        """Optional face alignment with error recovery"""
-        try:
-            if self.face_mesh is None:
-                return face_img
-
-            if face_img is None or face_img.size == 0:
-                return face_img
-
-            # Convert RGB to BGR for MediaPipe
-            bgr_img = cv2.cvtColor(face_img, cv2.COLOR_RGB2BGR)
-            results = self.face_mesh.process(bgr_img)
-
-            if not results.multi_face_landmarks:
-                return face_img
-
-            landmarks = results.multi_face_landmarks[0].landmark
-
-            try:
-                # Use eye landmarks for alignment
-                left_eye = (int(landmarks[33].x * face_img.shape[1]),
-                            int(landmarks[33].y * face_img.shape[0]))
-                right_eye = (int(landmarks[263].x * face_img.shape[1]),
-                             int(landmarks[263].y * face_img.shape[0]))
-
-                # Calculate rotation angle
-                dY = right_eye[1] - left_eye[1]
-                dX = right_eye[0] - left_eye[0]
-                angle = np.degrees(np.arctan2(dY, dX))
-
-                # Only rotate if angle is significant
-                if abs(angle) > 5:  # Increased threshold
-                    center = (face_img.shape[1] // 2, face_img.shape[0] // 2)
-                    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-                    aligned = cv2.warpAffine(face_img, M, (face_img.shape[1], face_img.shape[0]))
-                    return aligned
-
-                return face_img
-
-            except (IndexError, ValueError) as e:
-                logger.warning(f"Landmark extraction failed: {e}")
-                return face_img
-
-        except Exception as e:
-            logger.warning(f"Face alignment failed: {e}")
-            return face_img
-
-    def assess_quality_enterprise(self, face_img):
-        """Very lenient quality assessment"""
-        try:
-            if face_img is None or face_img.size == 0:
-                return True, 0.5  # Default to pass
-
-            if len(face_img.shape) == 3:
-                gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = face_img
-
-            h, w = gray.shape
-
-            # Very lenient size check
-            min_size = min(ENTERPRISE_CONFIG['webcam']['min_face_size'])
-            if min(h, w) < min_size:
-                return False, 0.0
-
-            # Very lenient quality metrics
-            focus = cv2.Laplacian(gray, cv2.CV_64F).var()
+            # Calculate quality metrics
             brightness = np.mean(gray)
             contrast = gray.std()
+            sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
 
-            # Generous scoring
-            focus_score = min(1.0, focus / 25.0)  # Much lower threshold
-            brightness_range = ENTERPRISE_CONFIG['quality']['brightness_range']
-            brightness_score = 1.0 if brightness_range[0] <= brightness <= brightness_range[1] else 0.8  # Still generous
-            contrast_score = min(1.0, contrast / 15.0)  # Lower threshold
+            # Normalize metrics
+            brightness_score = 1.0 - abs(brightness - 128) / 128
+            contrast_score = min(1.0, contrast / 50.0)
+            sharpness_score = min(1.0, sharpness / 100.0)
 
-            # Combined quality score with generous weighting
-            quality_score = (focus_score * 0.4 + brightness_score * 0.4 + contrast_score * 0.2)
-
-            # Very lenient pass criteria
-            passes = (
-                focus >= ENTERPRISE_CONFIG['quality']['min_focus'] and
-                brightness_range[0] <= brightness <= brightness_range[1] and
-                contrast >= ENTERPRISE_CONFIG['quality']['contrast_threshold']
-            )
-
-            # Override: accept marginal quality
-            if not passes and quality_score > 0.3:
-                passes = True
-
-            return passes, quality_score
+            return {
+                'brightness': brightness,
+                'contrast': contrast,
+                'sharpness': sharpness,
+                'brightness_score': brightness_score,
+                'contrast_score': contrast_score,
+                'sharpness_score': sharpness_score,
+                'overall_quality': (brightness_score + contrast_score + sharpness_score) / 3.0
+            }
 
         except Exception as e:
-            logger.error(f"Quality assessment failed: {e}")
-            return True, 0.5  # Default to pass on error
+            logger.error(f"Error assessing image quality: {e}")
+            return {'overall_quality': 0.5}
 
-    def handle_occlusions_enterprise(self, face_img, tracker=None):
-        """Very lenient occlusion handling"""
+    def apply_hist_eq(self, image: np.ndarray) -> np.ndarray:
+        """
+        Apply histogram equalization with validation
+
+        Args:
+            image: Input RGB image
+
+        Returns:
+            Histogram equalized image
+        """
         try:
-            # Quality check first but be very forgiving
-            quality_pass, quality_score = self.assess_quality_enterprise(face_img)
+            if len(image.shape) != 3 or image.shape[2] != 3:
+                logger.warning("Invalid image format for histogram equalization")
+                return image
 
-            # Accept almost everything
-            if quality_score < 0.1:  # Only reject very poor quality
-                return face_img, np.zeros_like(face_img[:, :, 0]), {
-                    'occlusion_level': 'very_low_quality',
-                    'confidence': 0.0,
-                    'quality_score': quality_score,
-                    'total_occlusion_percentage': 0.0
-                }
-
-            # Very lenient occlusion validation
-            is_occluded = self.occlusion_validator.validate(face_img)
-            occlusion_confidence = 0.3 if is_occluded else 0.05  # Lower confidence penalties
-
-            # Create result mask
-            if len(face_img.shape) == 3:
-                mask = np.zeros_like(face_img[:, :, 0])
-            else:
-                mask = np.zeros_like(face_img)
-
-            # Very minimal occlusion info
-            occlusion_info = {
-                'occlusion_level': 'minimal' if occlusion_confidence < 0.5 else 'moderate',
-                'confidence': occlusion_confidence,
-                'quality_score': quality_score,
-                'upper_occluded': is_occluded,
-                'lower_occluded': False,
-                'total_occlusion_percentage': occlusion_confidence * 0.3  # Much lower penalty
-            }
-
-            return face_img, mask, occlusion_info
+            gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+            equalized = cv2.equalizeHist(gray)
+            return cv2.cvtColor(equalized, cv2.COLOR_GRAY2RGB)
 
         except Exception as e:
-            logger.error(f"Enterprise occlusion handling failed: {e}")
-            return face_img, np.zeros_like(face_img[:, :, 0] if len(face_img.shape) == 3 else face_img), {
-                'occlusion_level': 'error',
-                'confidence': 0.0,
-                'quality_score': 0.5,
-                'total_occlusion_percentage': 0.0
-            }
+            logger.error(f"Error in histogram equalization: {e}")
+            return image
 
-    def preprocess_enterprise(self, image, is_webcam=False, tracker=None):
-        """Complete enterprise preprocessing pipeline with lenient standards"""
+    def apply_clahe(self, image: np.ndarray, adaptive: bool = True) -> np.ndarray:
+        """
+        Apply CLAHE with adaptive parameters
+
+        Args:
+            image: Input RGB image
+            adaptive: Whether to use adaptive parameters
+
+        Returns:
+            CLAHE enhanced image
+        """
+        try:
+            if len(image.shape) != 3 or image.shape[2] != 3:
+                return image
+
+            # Convert to LAB color space
+            lab = cv2.cvtColor(image, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+
+            # Adaptive CLAHE parameters
+            if adaptive and self.adaptive_mode:
+                quality_metrics = self.assess_image_quality(image)
+                # Adjust clip limit based on image contrast
+                if quality_metrics['contrast'] < 20:
+                    clip_limit = 2.5  # Higher for low contrast images
+                elif quality_metrics['contrast'] > 60:
+                    clip_limit = 1.0  # Lower for high contrast images
+                else:
+                    clip_limit = self.clahe_params['clipLimit']
+            else:
+                clip_limit = self.clahe_params['clipLimit']
+
+            # Apply CLAHE
+            clahe = cv2.createCLAHE(
+                clipLimit=clip_limit,
+                tileGridSize=self.clahe_params['tileGridSize']
+            )
+            cl = clahe.apply(l)
+
+            # Merge channels and convert back
+            enhanced_lab = cv2.merge((cl, a, b))
+            return cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2RGB)
+
+        except Exception as e:
+            logger.error(f"Error in CLAHE enhancement: {e}")
+            return image
+
+    def apply_gamma(self, image: np.ndarray, gamma: float = 1.2) -> np.ndarray:
+        """
+        Apply gamma correction with optimized default value
+
+        Args:
+            image: Input RGB image
+            gamma: Gamma correction value (optimized default: 1.2)
+
+        Returns:
+            Gamma corrected image
+        """
+        try:
+            # Use more conservative gamma for face recognition
+            inv_gamma = 1.0 / gamma
+            table = np.array([
+                ((i / 255.0) ** inv_gamma) * 255
+                for i in np.arange(256)
+            ]).astype("uint8")
+
+            return cv2.LUT(image, table)
+
+        except Exception as e:
+            logger.error(f"Error in gamma correction: {e}")
+            return image
+
+    def apply_adaptive_gamma(self, image: np.ndarray) -> np.ndarray:
+        """
+        Apply adaptive gamma correction based on image brightness
+
+        Args:
+            image: Input RGB image
+
+        Returns:
+            Adaptively gamma corrected image
+        """
+        try:
+            quality_metrics = self.assess_image_quality(image)
+            brightness = quality_metrics['brightness']
+
+            # Adaptive gamma selection
+            if brightness < 80:  # Dark image
+                gamma = 0.8  # Brighten
+            elif brightness > 180:  # Bright image
+                gamma = 1.4  # Darken slightly
+            else:  # Normal brightness
+                gamma = 1.0  # No correction needed
+
+            return self.apply_gamma(image, gamma) if gamma != 1.0 else image
+
+        except Exception as e:
+            logger.error(f"Error in adaptive gamma correction: {e}")
+            return image
+
+    def apply_denoise(self, image: np.ndarray, adaptive: bool = True) -> np.ndarray:
+        """
+        Apply bilateral filtering with adaptive parameters
+
+        Args:
+            image: Input RGB image
+            adaptive: Whether to use adaptive parameters
+
+        Returns:
+            Denoised image
+        """
+        try:
+            if adaptive and self.adaptive_mode:
+                quality_metrics = self.assess_image_quality(image)
+                # Adjust denoising strength based on image quality
+                if quality_metrics['sharpness'] < 30:  # Blurry image
+                    d = 5  # Light denoising to preserve details
+                    sigma_color = 30
+                    sigma_space = 30
+                else:  # Sharp image
+                    d = self.bilateral_params['d']
+                    sigma_color = self.bilateral_params['sigmaColor']
+                    sigma_space = self.bilateral_params['sigmaSpace']
+            else:
+                d = self.bilateral_params['d']
+                sigma_color = self.bilateral_params['sigmaColor']
+                sigma_space = self.bilateral_params['sigmaSpace']
+
+            return cv2.bilateralFilter(image, d, sigma_color, sigma_space)
+
+        except Exception as e:
+            logger.error(f"Error in denoising: {e}")
+            return image
+
+    def apply_sharpen(self, image: np.ndarray, adaptive: bool = True) -> np.ndarray:
+        """
+        Apply sharpening with adaptive intensity
+
+        Args:
+            image: Input RGB image
+            adaptive: Whether to use adaptive sharpening
+
+        Returns:
+            Sharpened image
+        """
+        try:
+            if adaptive and self.adaptive_mode:
+                quality_metrics = self.assess_image_quality(image)
+                # Only sharpen if image is sufficiently blurry
+                if quality_metrics['sharpness'] < 50:
+                    kernel = self.sharpen_kernel
+                else:
+                    return image  # Skip sharpening for already sharp images
+            else:
+                kernel = self.sharpen_kernel
+
+            sharpened = cv2.filter2D(image, -1, kernel)
+
+            # Blend with original to avoid over-sharpening
+            alpha = 0.7  # Reduced from full strength
+            return cv2.addWeighted(image, 1 - alpha, sharpened, alpha, 0)
+
+        except Exception as e:
+            logger.error(f"Error in sharpening: {e}")
+            return image
+
+    def apply_unsharp_mask(self, image: np.ndarray, amount: float = 0.5) -> np.ndarray:
+        """
+        Apply unsharp masking for better detail enhancement
+
+        Args:
+            image: Input RGB image
+            amount: Sharpening amount (0.0 to 1.0)
+
+        Returns:
+            Unsharp masked image
+        """
+        try:
+            # Create Gaussian blur
+            blurred = cv2.GaussianBlur(image, (5, 5), 1.0)
+
+            # Create unsharp mask
+            unsharp_mask = cv2.addWeighted(image, 1.0 + amount, blurred, -amount, 0)
+
+            return np.clip(unsharp_mask, 0, 255).astype(np.uint8)
+
+        except Exception as e:
+            logger.error(f"Error in unsharp masking: {e}")
+            return image
+
+    def enhance_image(self, image: np.ndarray,
+                      enhancement_level: str = "moderate") -> np.ndarray:
+        """
+        Main image enhancement pipeline optimized for face recognition
+
+        Args:
+            image: Input RGB image
+            enhancement_level: "light", "moderate", or "aggressive"
+
+        Returns:
+            Enhanced image optimized for face recognition
+        """
+        try:
+            if image is None or image.size == 0:
+                return image
+
+            # Validate input
+            if len(image.shape) != 3 or image.shape[2] != 3:
+                logger.warning("Invalid image format for enhancement")
+                return image
+
+            # Ensure uint8 format
+            if image.dtype != np.uint8:
+                if image.max() <= 1.0:
+                    image = (image * 255).astype(np.uint8)
+                else:
+                    image = np.clip(image, 0, 255).astype(np.uint8)
+
+            enhanced = image.copy()
+
+            # Apply enhancement based on level
+            if enhancement_level == "light":
+                # Minimal processing for high-quality images
+                if self.adaptive_mode:
+                    enhanced = self.apply_adaptive_gamma(enhanced)
+                else:
+                    enhanced = self.apply_gamma(enhanced, 1.1)
+                enhanced = self.apply_clahe(enhanced, adaptive=True)
+
+            elif enhancement_level == "moderate":
+                # Standard processing for most face recognition scenarios
+                enhanced = self.apply_adaptive_gamma(enhanced)
+                enhanced = self.apply_clahe(enhanced, adaptive=True)
+                enhanced = self.apply_denoise(enhanced, adaptive=True)
+
+            elif enhancement_level == "aggressive":
+                # Heavy processing for challenging images
+                enhanced = self.apply_gamma(enhanced, 1.3)
+                enhanced = self.apply_clahe(enhanced, adaptive=False)
+                enhanced = self.apply_denoise(enhanced, adaptive=False)
+                enhanced = self.apply_sharpen(enhanced, adaptive=True)
+
+            return enhanced
+
+        except Exception as e:
+            logger.error(f"Error in image enhancement: {e}")
+            return image
+
+    def preprocess_for_recognition(self, image: np.ndarray) -> Tuple[np.ndarray, Dict]:
+        """
+        Complete preprocessing pipeline for face recognition
+
+        Args:
+            image: Input face image
+
+        Returns:
+            Tuple of (processed_image, processing_info)
+        """
         start_time = time.time()
 
         try:
-            if image is None or image.size == 0:
-                return None, None, {'occlusion_level': 'error', 'total_occlusion_percentage': 0.0}, 0.0
+            # Assess initial quality
+            initial_quality = self.assess_image_quality(image)
 
-            # Minimal enhancement
-            enhanced = self.enhance_image_enterprise(image, is_webcam)
-
-            # Optional alignment only for webcam
-            if is_webcam and enhanced is not None:
-                aligned = self.align_face_enterprise(enhanced)
+            # Determine enhancement level based on quality
+            if initial_quality['overall_quality'] > 0.7:
+                enhancement_level = "light"
+            elif initial_quality['overall_quality'] > 0.4:
+                enhancement_level = "moderate"
             else:
-                aligned = enhanced
+                enhancement_level = "aggressive"
 
-            # Lenient quality and occlusion handling
-            processed_face, mask, occlusion_info = self.handle_occlusions_enterprise(aligned, tracker)
+            # Apply enhancement
+            processed_image = self.enhance_image(image, enhancement_level)
 
-            # Generous final quality score
-            quality_score = max(0.5, occlusion_info.get('quality_score', 0.7))  # Default to good score
+            # Assess final quality
+            final_quality = self.assess_image_quality(processed_image)
 
-            if ENTERPRISE_CONFIG['performance']['enable_monitoring']:
-                preprocessing_monitor.record_processing(
-                    True, time.time() - start_time,
-                    quality_pass=quality_score > 0.2,  # Very lenient
-                    occluded=occlusion_info.get('confidence', 0) > 0.6  # Higher threshold
-                )
+            processing_info = {
+                'enhancement_level': enhancement_level,
+                'initial_quality': initial_quality,
+                'final_quality': final_quality,
+                'quality_improvement': final_quality['overall_quality'] - initial_quality['overall_quality'],
+                'processing_time': time.time() - start_time
+            }
 
-            return processed_face, mask, occlusion_info, quality_score
+            return processed_image, processing_info
 
         except Exception as e:
-            logger.error(f"Enterprise preprocessing failed: {e}")
-            if ENTERPRISE_CONFIG['performance']['enable_monitoring']:
-                preprocessing_monitor.record_processing(False, time.time() - start_time)
-            return None, None, {'occlusion_level': 'error', 'total_occlusion_percentage': 0.0}, 0.0
+            logger.error(f"Error in preprocessing pipeline: {e}")
+            return image, {'error': str(e)}
 
-    def get_metrics(self):
-        """Get preprocessing performance metrics"""
-        return preprocessing_monitor.metrics.copy()
 
-# Global enterprise preprocessor
-enterprise_preprocessor = EnterprisePreprocessor()
+# Global instance for backward compatibility
+preprocessor = ImagePreprocessor(adaptive_mode=True)
 
-# Legacy API compatibility (maintained exactly as before)
-def precise_alignment(face_img):
-    """Legacy MediaPipe alignment"""
-    return enterprise_preprocessor.align_face_enterprise(face_img)
 
-def enhance_image(image, is_webcam=False):
-    """Legacy enhancement function"""
-    return enterprise_preprocessor.enhance_image_enterprise(image, is_webcam)
+# Backward compatibility functions
+def apply_hist_eq(image):
+    """Backward compatible histogram equalization"""
+    return preprocessor.apply_hist_eq(image)
 
-def assess_quality(face_img):
-    """Legacy quality assessment"""
-    quality_pass, _ = enterprise_preprocessor.assess_quality_enterprise(face_img)
-    return quality_pass
 
-def handle_occlusions_production(face_img, tracker=None):
-    """Legacy occlusion handling"""
-    return enterprise_preprocessor.handle_occlusions_enterprise(face_img, tracker)
+def apply_clahe(image):
+    """Backward compatible CLAHE"""
+    return preprocessor.apply_clahe(image)
 
-def preprocess_image_with_occlusion_handling(image, is_webcam=False):
-    """Legacy preprocessing pipeline"""
-    return enterprise_preprocessor.preprocess_enterprise(image, is_webcam)
 
-# Legacy classes for compatibility
-class OcclusionValidator:
-    def __init__(self):
-        self.enterprise_validator = enterprise_preprocessor.occlusion_validator
+def apply_gamma(image, gamma=1.2):  # Changed default from 1.5 to 1.2
+    """Backward compatible gamma correction with optimized default"""
+    return preprocessor.apply_gamma(image, gamma)
 
-    def validate(self, face_img):
-        return self.enterprise_validator.validate(face_img)
 
-class TemporalOcclusionTracker:
-    def __init__(self):
-        self.history = []
+def apply_denoise(image):
+    """Backward compatible denoising"""
+    return preprocessor.apply_denoise(image)
 
-    def update(self, occlusion_level):
-        self.history = self.history[-ENTERPRISE_CONFIG['occlusion']['temporal_window']:] + [occlusion_level]
 
-    @property
-    def significant_occlusion(self):
-        if len(self.history) < 2:  # Very reduced minimum
-            return False
-        return sum(1 for lvl in self.history if lvl > 0.6) / len(self.history) > 0.7  # Higher threshold
+def apply_sharpen(image):
+    """Backward compatible sharpening"""
+    return preprocessor.apply_sharpen(image)
 
-# Legacy instances
-occlusion_validator = OcclusionValidator()
 
-def get_preprocessing_metrics():
-    """Get enterprise preprocessing metrics"""
-    return enterprise_preprocessor.get_metrics()
+def enhance_image(image):
+    """Enhanced backward compatible function"""
+    return preprocessor.enhance_image(image, "moderate")
 
-logger.info("Enterprise preprocessing system initialized with very lenient quality standards")
+
+# New optimized function for face recognition
+def preprocess_face_image(image, adaptive=True):
+    """
+    Optimized preprocessing specifically for face recognition
+
+    Args:
+        image: Input face image
+        adaptive: Whether to use adaptive enhancement
+
+    Returns:
+        Preprocessed image ready for recognition
+    """
+    global preprocessor
+    if adaptive:
+        preprocessor.adaptive_mode = True
+        processed_image, _ = preprocessor.preprocess_for_recognition(image)
+        return processed_image
+    else:
+        return preprocessor.enhance_image(image, "moderate")
+
+
+if __name__ == "__main__":
+    # Example usage and testing
+    try:
+        # Create test image
+        test_image = np.random.randint(0, 255, (160, 160, 3), dtype=np.uint8)
+
+        # Test preprocessing
+        processor = ImagePreprocessor(adaptive_mode=True)
+        enhanced_image, info = processor.preprocess_for_recognition(test_image)
+
+        print("Preprocessing Test Results:")
+        print(f"Enhancement level: {info['enhancement_level']}")
+        print(f"Quality improvement: {info['quality_improvement']:.3f}")
+        print(f"Processing time: {info['processing_time']:.3f}s")
+
+    except Exception as e:
+        print(f"Error in preprocessing test: {e}")

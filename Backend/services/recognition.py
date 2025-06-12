@@ -1,158 +1,125 @@
-import cv2
 import torch
 import numpy as np
 import pickle
 import os
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor
-import faiss
-from facenet_pytorch import InceptionResnetV1
 from PIL import Image
+from facenet_pytorch import InceptionResnetV1
 from torchvision import transforms
-import threading
+import faiss
+from typing import Dict, List, Tuple, Optional, Union
 
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Updated Enterprise Configuration with Lenient Recognition Thresholds
-ENTERPRISE_CONFIG = {
-    'euclidean_threshold': 0.8,  # INCREASED from 0.6 for more lenient matching
-    'min_embeddings_per_id': 1,  # Accept single embeddings
-    'max_embeddings_per_id': 8,
-    'normalize_embeddings': True,
-    'batch_size': 32,
-    'faiss_index_type': 'IVF',
-    'memory_limit_gb': 4,
-    'cache_size': 1000,
-    'num_threads': 4,
-    'performance_monitoring': True,
-    'auto_reload_embeddings': True,
-    'confidence_threshold': 0.25  # LOWERED from 0.4 for more acceptance
-}
 
+class FaceRecognitionSystem:
+    """
+    Optimized face recognition system for LFW and standard datasets
+    """
 
-class PerformanceMonitor:
-    """Enterprise performance tracking"""
+    def __init__(self, embeddings_path: str = "assets/embeddings.pkl",
+                 model_device: str = None, use_faiss: bool = True):
+        """
+        Initialize the face recognition system
 
-    def __init__(self):
-        self.metrics = {
-            'total_recognitions': 0,
-            'avg_response_time': 0.0,
-            'cache_hits': 0,
-            'cache_misses': 0,
-            'errors': 0
-        }
-        self.lock = threading.Lock()
+        Args:
+            embeddings_path: Path to stored embeddings file
+            model_device: Device to run model on ('cuda' or 'cpu')
+            use_faiss: Whether to use FAISS for fast similarity search
+        """
+        self.embeddings_path = embeddings_path
+        self.device = torch.device(model_device or ('cuda' if torch.cuda.is_available() else 'cpu'))
+        self.use_faiss = use_faiss
 
-    def record_recognition(self, response_time, cache_hit=False, error=False):
-        with self.lock:
-            self.metrics['total_recognitions'] += 1
-            self.metrics['avg_response_time'] = (
-                    (self.metrics['avg_response_time'] * (self.metrics['total_recognitions'] - 1) + response_time)
-                    / self.metrics['total_recognitions']
-            )
-            if cache_hit:
-                self.metrics['cache_hits'] += 1
-            else:
-                self.metrics['cache_misses'] += 1
-            if error:
-                self.metrics['errors'] += 1
+        # Initialize model
+        self.model = self._load_model()
 
-
-monitor = PerformanceMonitor()
-
-
-class EnterpriseRecognizer:
-    """Enterprise-grade face recognition system with lenient thresholds"""
-
-    def __init__(self, embeddings_path=None):
-        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        self.model = None
-        self.faiss_index = None
+        # Load embeddings
+        self.stored_embeddings = self._load_embeddings()
         self.identity_map = {}
-        self.embeddings_path = embeddings_path or os.path.abspath("./assets/embeddings.pkl")
-        self.last_reload = 0
-        self.executor = ThreadPoolExecutor(max_workers=ENTERPRISE_CONFIG['num_threads'])
+        self.faiss_index = None
 
-        self.transform = transforms.Compose([
+        # Initialize FAISS index if requested
+        if self.use_faiss and self.stored_embeddings:
+            self._build_faiss_index()
+
+        # Define preprocessing pipeline optimized for LFW
+        self.preprocess = transforms.Compose([
+            transforms.ToPILImage() if not isinstance(transforms.ToPILImage(), type) else lambda x: x,
             transforms.Resize((160, 160)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])  # Fixed for RGB
         ])
 
-        model_loaded = self._initialize_model()
-        if model_loaded:
-            self._load_embeddings()
-        else:
-            logger.warning("Enterprise recognizer initialized without model")
+        logger.info(f"Face recognition system initialized with {len(self.stored_embeddings)} identities")
 
-    def _initialize_model(self):
-        """Initialize FaceNet model with error handling"""
+    def _load_model(self) -> InceptionResnetV1:
+        """Load and initialize the FaceNet model"""
         try:
-            self.model = InceptionResnetV1(pretrained='vggface2').eval().to(self.device)
-            logger.info(f"SUCCESS: FaceNet model loaded on {self.device}")
-            return True
+            model = InceptionResnetV1(pretrained='vggface2').eval().to(self.device)
+            logger.info(f"FaceNet model loaded successfully on {self.device}")
+            return model
         except Exception as e:
-            logger.error(f"Enterprise model initialization failed: {e}")
-            self.model = None
-            return False
+            raise RuntimeError(f"Could not load FaceNet PyTorch model: {e}")
 
-    def _load_embeddings(self):
-        """Load embeddings with FAISS indexing and improved error handling"""
+    def _load_embeddings(self) -> Dict:
+        """Load stored embeddings with enhanced error handling"""
         try:
-            start_time = time.time()
+            with open(self.embeddings_path, "rb") as f:
+                embeddings = pickle.load(f)
 
-            if not os.path.exists(self.embeddings_path):
-                logger.warning(f"Embeddings file not found: {self.embeddings_path}")
-                os.makedirs(os.path.dirname(self.embeddings_path), exist_ok=True)
-                with open(self.embeddings_path, 'wb') as f:
-                    pickle.dump({}, f)
-                return
+            # Validate embeddings structure
+            if not isinstance(embeddings, dict):
+                raise ValueError("Embeddings must be a dictionary")
 
-            with open(self.embeddings_path, 'rb') as f:
-                raw_data = pickle.load(f)
-
-            if not raw_data:
-                logger.warning("Empty embeddings file")
-                return
-
-            # Process and validate embeddings with lenient requirements
-            valid_embeddings = []
-            identity_labels = []
-
-            for identity, data in raw_data.items():
-                # Handle multiple data formats
-                if isinstance(data, dict) and 'embeddings' in data:
-                    emb_list = data['embeddings']
-                elif isinstance(data, list):
-                    emb_list = data
-                elif isinstance(data, np.ndarray) and data.size == 512:
-                    emb_list = [data]
+            # Process embeddings to handle different formats
+            processed_embeddings = {}
+            for identity, embedding_data in embeddings.items():
+                if isinstance(embedding_data, list):
+                    # Handle multiple embeddings per identity
+                    valid_embeddings = [emb for emb in embedding_data
+                                        if isinstance(emb, np.ndarray) and emb.size == 512]
+                    if valid_embeddings:
+                        # Use average embedding for better representation
+                        processed_embeddings[identity] = np.mean(valid_embeddings, axis=0)
+                elif isinstance(embedding_data, np.ndarray) and embedding_data.size == 512:
+                    processed_embeddings[identity] = embedding_data
                 else:
-                    continue
+                    logger.warning(f"Invalid embedding format for {identity}")
 
-                # Validate embeddings
-                valid = [e for e in emb_list if isinstance(e, np.ndarray) and e.size == 512]
+            logger.info(f"Loaded {len(processed_embeddings)} valid embeddings")
+            return processed_embeddings
 
-                # More lenient: accept even single embeddings
-                if len(valid) >= ENTERPRISE_CONFIG['min_embeddings_per_id']:
-                    valid = valid[:ENTERPRISE_CONFIG['max_embeddings_per_id']]
-                    for embedding in valid:
-                        if ENTERPRISE_CONFIG['normalize_embeddings']:
-                            embedding = embedding / np.linalg.norm(embedding)
-                        valid_embeddings.append(embedding)
-                        identity_labels.append(identity)
+        except FileNotFoundError:
+            logger.warning("Embeddings file not found. System will work with empty embeddings.")
+            return {}
+        except Exception as e:
+            logger.error(f"Error loading embeddings: {e}")
+            return {}
 
-            if not valid_embeddings:
-                logger.warning("No valid embeddings found")
+    def _build_faiss_index(self):
+        """Build FAISS index for fast similarity search"""
+        try:
+            embeddings_list = []
+            identity_list = []
+
+            for identity, embedding in self.stored_embeddings.items():
+                embeddings_list.append(embedding)
+                identity_list.append(identity)
+
+            if not embeddings_list:
                 return
 
-            embeddings_matrix = np.array(valid_embeddings).astype('float32')
+            # Convert to numpy array
+            embeddings_matrix = np.array(embeddings_list).astype('float32')
 
-            # CRITICAL FIX: Adjust FAISS configuration to prevent clustering warnings
-            if len(valid_embeddings) > 100:
-                nlist = max(1, len(valid_embeddings) // 39)  # Ensure proper clustering ratio
-                nlist = min(nlist, 256)  # Cap at reasonable maximum
+            # Choose appropriate FAISS index
+            if len(embeddings_list) > 1000:
+                # Use IVF index for large datasets
+                nlist = min(int(np.sqrt(len(embeddings_list))), 256)
                 quantizer = faiss.IndexFlatL2(512)
                 self.faiss_index = faiss.IndexIVFFlat(quantizer, 512, nlist)
                 self.faiss_index.train(embeddings_matrix)
@@ -161,209 +128,405 @@ class EnterpriseRecognizer:
                 self.faiss_index = faiss.IndexFlatL2(512)
 
             self.faiss_index.add(embeddings_matrix)
-            self.identity_map = {i: identity for i, identity in enumerate(identity_labels)}
+            self.identity_map = {i: identity for i, identity in enumerate(identity_list)}
 
-            load_time = time.time() - start_time
-            logger.info(
-                f"✅ Loaded {len(valid_embeddings)} embeddings for {len(set(identity_labels))} identities in {load_time:.2f}s")
-            self.last_reload = time.time()
+            logger.info(f"FAISS index built with {len(embeddings_list)} embeddings")
 
         except Exception as e:
-            logger.error(f"Failed to load embeddings: {e}")
+            logger.error(f"Error building FAISS index: {e}")
             self.faiss_index = None
 
-    def get_embedding(self, face_img):
-        """Enterprise-grade embedding extraction"""
-        start_time = time.time()
+    def get_embedding(self, face_pixels: Union[np.ndarray, Image.Image]) -> Optional[np.ndarray]:
+        """
+        Generate embedding from face image with enhanced preprocessing
 
+        Args:
+            face_pixels: Input face image as numpy array or PIL Image
+
+        Returns:
+            512-dimensional embedding vector or None if processing fails
+        """
         try:
-            if self.model is None:
-                logger.error("Model not initialized")
+            # Input validation
+            if face_pixels is None:
                 return None
 
-            if face_img is None or face_img.size == 0:
-                logger.error("Invalid face image")
-                return None
-
-            # Ensure proper image format
-            if len(face_img.shape) == 3 and face_img.shape[2] == 3:
-                if face_img.dtype == np.uint8:
-                    face_img = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
+            # Handle different input types
+            if isinstance(face_pixels, Image.Image):
+                # Convert PIL to numpy
+                face_array = np.array(face_pixels)
+            elif isinstance(face_pixels, np.ndarray):
+                face_array = face_pixels.copy()
             else:
-                logger.error("Face image must be 3-channel RGB")
+                logger.error("Invalid input type for face_pixels")
                 return None
 
-            pil_image = Image.fromarray(face_img)
-            face_tensor = self.transform(pil_image).unsqueeze(0).to(self.device)
+            # Ensure 3-channel RGB
+            if len(face_array.shape) == 2:
+                face_array = np.stack([face_array] * 3, axis=-1)
+            elif face_array.shape[2] == 4:  # RGBA
+                face_array = face_array[:, :, :3]
 
+            # Ensure uint8 format
+            if face_array.dtype != np.uint8:
+                if face_array.max() <= 1.0:
+                    face_array = (face_array * 255).astype(np.uint8)
+                else:
+                    face_array = np.clip(face_array, 0, 255).astype(np.uint8)
+
+            # Apply preprocessing
+            img_tensor = self.preprocess(face_array)
+            img_tensor = img_tensor.unsqueeze(0).to(self.device)
+
+            # Generate embedding
             with torch.no_grad():
-                embedding = self.model(face_tensor).cpu().numpy()[0]
+                embedding = self.model(img_tensor)
 
-            if ENTERPRISE_CONFIG['normalize_embeddings']:
-                embedding = embedding / np.linalg.norm(embedding)
+            # Convert to numpy and normalize
+            embedding_np = embedding[0].cpu().numpy()
+            embedding_normalized = embedding_np / np.linalg.norm(embedding_np)
 
-            monitor.record_recognition(time.time() - start_time, cache_hit=False)
-            return embedding
+            return embedding_normalized
 
         except Exception as e:
-            logger.error(f"Embedding extraction failed: {e}")
-            monitor.record_recognition(time.time() - start_time, error=True)
+            logger.error(f"Error generating embedding: {e}")
             return None
 
-    def recognize_face(self, embedding, confidence_threshold=None):
-        """Fast recognition using FAISS index with lenient thresholds"""
+    def predict_face_faiss(self, embedding: np.ndarray, k: int = 5,
+                           threshold: float = 0.6) -> Tuple[str, float]:
+        """
+        Predict identity using FAISS index for fast search
+
+        Args:
+            embedding: Input embedding vector
+            k: Number of nearest neighbors to search
+            threshold: Distance threshold for recognition
+
+        Returns:
+            Tuple of (identity, confidence_score)
+        """
         if self.faiss_index is None or embedding is None:
             return "Unknown", 0.0
 
         try:
-            threshold = confidence_threshold or ENTERPRISE_CONFIG['euclidean_threshold']
-            embedding = embedding.reshape(1, -1).astype('float32')
-            k = min(10, self.faiss_index.ntotal)
-            distances, indices = self.faiss_index.search(embedding, k=k)
+            # Prepare embedding for search
+            query_embedding = embedding.reshape(1, -1).astype('float32')
 
-            identity_scores = {}
-            for distance, idx in zip(distances[0], indices[0]):
-                if idx == -1 or idx >= len(self.identity_map):
-                    continue
+            # Search for nearest neighbors
+            distances, indices = self.faiss_index.search(query_embedding, k)
 
-                identity = self.identity_map.get(idx, "Unknown")
-                if identity == "Unknown":
-                    continue
+            # Process results
+            best_distance = distances[0][0]
+            best_idx = indices[0][0]
 
-                # CRITICAL FIX: Enhanced type-safe similarity calculation
-                if isinstance(distance, dict):
-                    logger.error(f"Distance is a dict, skipping: {distance}")
-                    continue
+            if best_distance < threshold and best_idx in self.identity_map:
+                identity = self.identity_map[best_idx]
+                confidence = max(0.0, 1.0 - (best_distance / threshold))
+                return identity, confidence
 
-                try:
-                    # Ensure distance is numeric before division
-                    distance_value = float(distance)
-                    similarity = max(0, 1 - (distance_value / (threshold * 2)))
-                except (TypeError, ValueError) as e:
-                    logger.error(f"Similarity calculation error: {e}")
-                    continue
-
-                if identity in identity_scores:
-                    identity_scores[identity] = max(identity_scores[identity], similarity)
-                else:
-                    identity_scores[identity] = similarity
-
-            if not identity_scores:
-                return "Unknown", 0.0
-
-            best_identity, best_score = max(identity_scores.items(), key=lambda x: x[1])
-
-            if not isinstance(best_score, (float, int)):
-                logger.error(f"Best score is not numeric: {best_score}")
-                return "Unknown", 0.0
-
-            # Use the lenient confidence threshold
-            if best_score < ENTERPRISE_CONFIG['confidence_threshold']:
-                return "Unknown", best_score
-
-            return best_identity, best_score
-
-        except Exception as e:
-            logger.error(f"Recognition failed: {e}")
             return "Unknown", 0.0
 
-    def reload_embeddings_if_needed(self):
-        """Hot reload embeddings if file has been updated"""
-        if not ENTERPRISE_CONFIG['auto_reload_embeddings']:
-            return
-
-        try:
-            if os.path.exists(self.embeddings_path):
-                file_mtime = os.path.getmtime(self.embeddings_path)
-                if file_mtime > self.last_reload:
-                    logger.info("Reloading embeddings due to file update")
-                    self._load_embeddings()
         except Exception as e:
-            logger.error(f"Failed to check for embedding updates: {e}")
-
-    def get_metrics(self):
-        """Get performance metrics"""
-        return monitor.metrics.copy()
-
-    def add_face_encoding(self, identity, embedding):
-        """Add new face encoding to the system"""
-        try:
-            if os.path.exists(self.embeddings_path):
-                with open(self.embeddings_path, 'rb') as f:
-                    embeddings_data = pickle.load(f)
-            else:
-                embeddings_data = {}
-
-            if identity not in embeddings_data:
-                embeddings_data[identity] = []
-            if isinstance(embeddings_data[identity], list):
-                embeddings_data[identity].append(embedding)
-            else:
-                embeddings_data[identity] = [embeddings_data[identity], embedding]
-
-            with open(self.embeddings_path, 'wb') as f:
-                pickle.dump(embeddings_data, f)
-
-            self._load_embeddings()
-            logger.info(f"Added new encoding for {identity}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to add face encoding: {e}")
-            return False
-
-
-# Global recognizer instance
-recognizer = EnterpriseRecognizer()
-
-
-# Legacy API compatibility
-def get_embedding(face_img):
-    """Legacy API wrapper"""
-    recognizer.reload_embeddings_if_needed()
-    return recognizer.get_embedding(face_img)
-
-
-def predict_face_with_occlusion_handling(face_img, occlusion_info=None, stored_embeddings_param=None,
-                                         metric='euclidean'):
-    """Legacy API wrapper with enterprise backend"""
-    try:
-        recognizer.reload_embeddings_if_needed()
-        embedding = recognizer.get_embedding(face_img)
-        if embedding is None:
+            logger.error(f"Error in FAISS prediction: {e}")
             return "Unknown", 0.0
 
-        threshold = ENTERPRISE_CONFIG['euclidean_threshold']
-        if occlusion_info:
-            occlusion_level = occlusion_info.get('total_occlusion_percentage', 0.0)
-            threshold += occlusion_level * 0.05  # Reduced penalty for occlusion
+    def predict_face_linear(self, embedding: np.ndarray,
+                            threshold: float = 0.6) -> Tuple[str, float]:
+        """
+        Predict identity using linear search (fallback method)
 
-        return recognizer.recognize_face(embedding, threshold)
+        Args:
+            embedding: Input embedding vector
+            threshold: Distance threshold for recognition
 
-    except Exception as e:
-        logger.error(f"Recognition pipeline failed: {e}")
+        Returns:
+            Tuple of (identity, confidence_score)
+        """
+        if not self.stored_embeddings or embedding is None:
+            return "Unknown", 0.0
+
+        try:
+            min_distance = float("inf")
+            best_identity = "Unknown"
+
+            for identity, stored_emb in self.stored_embeddings.items():
+                # Calculate Euclidean distance
+                distance = np.linalg.norm(embedding - stored_emb)
+
+                if distance < min_distance:
+                    min_distance = distance
+                    best_identity = identity
+
+            # Check if distance is within threshold
+            if min_distance < threshold:
+                confidence = max(0.0, 1.0 - (min_distance / threshold))
+                return best_identity, confidence
+
+            return "Unknown", 0.0
+
+        except Exception as e:
+            logger.error(f"Error in linear prediction: {e}")
+            return "Unknown", 0.0
+
+    def predict_face(self, embedding: np.ndarray, threshold: float = 0.6) -> Tuple[str, float]:
+        """
+        Main prediction function that chooses between FAISS and linear search
+
+        Args:
+            embedding: Input embedding vector
+            threshold: Distance threshold for recognition
+
+        Returns:
+            Tuple of (identity, confidence_score)
+        """
+        if self.use_faiss and self.faiss_index is not None:
+            return self.predict_face_faiss(embedding, threshold=threshold)
+        else:
+            return self.predict_face_linear(embedding, threshold=threshold)
+
+    def recognize_face(self, face_image: Union[np.ndarray, Image.Image],
+                       threshold: float = 0.6) -> Dict:
+        """
+        Complete face recognition pipeline
+
+        Args:
+            face_image: Input face image
+            threshold: Recognition threshold
+
+        Returns:
+            Dictionary with recognition results
+        """
+        start_time = time.time()
+
+        try:
+            # Generate embedding
+            embedding = self.get_embedding(face_image)
+            if embedding is None:
+                return {
+                    "identity": "Unknown",
+                    "confidence": 0.0,
+                    "error": "Failed to generate embedding",
+                    "processing_time": time.time() - start_time
+                }
+
+            # Predict identity
+            identity, confidence = self.predict_face(embedding, threshold)
+
+            return {
+                "identity": identity,
+                "confidence": round(confidence, 4),
+                "threshold": threshold,
+                "processing_time": round(time.time() - start_time, 4),
+                "embedding_norm": round(np.linalg.norm(embedding), 4)
+            }
+
+        except Exception as e:
+            logger.error(f"Error in face recognition: {e}")
+            return {
+                "identity": "Unknown",
+                "confidence": 0.0,
+                "error": str(e),
+                "processing_time": time.time() - start_time
+            }
+
+    def add_identity(self, identity: str, face_images: List[Union[np.ndarray, Image.Image]]):
+        """
+        Add new identity to the system
+
+        Args:
+            identity: Name/ID of the person
+            face_images: List of face images for the person
+        """
+        try:
+            embeddings = []
+            for face_image in face_images:
+                embedding = self.get_embedding(face_image)
+                if embedding is not None:
+                    embeddings.append(embedding)
+
+            if embeddings:
+                # Use average embedding
+                avg_embedding = np.mean(embeddings, axis=0)
+                self.stored_embeddings[identity] = avg_embedding
+
+                # Rebuild FAISS index
+                if self.use_faiss:
+                    self._build_faiss_index()
+
+                logger.info(f"Added identity '{identity}' with {len(embeddings)} embeddings")
+            else:
+                logger.warning(f"No valid embeddings generated for '{identity}'")
+
+        except Exception as e:
+            logger.error(f"Error adding identity: {e}")
+
+    def save_embeddings(self, output_path: str = None):
+        """Save current embeddings to file"""
+        try:
+            save_path = output_path or self.embeddings_path
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+            with open(save_path, 'wb') as f:
+                pickle.dump(self.stored_embeddings, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            logger.info(f"Embeddings saved to {save_path}")
+
+        except Exception as e:
+            logger.error(f"Error saving embeddings: {e}")
+
+    def get_stats(self) -> Dict:
+        """Get system statistics"""
+        return {
+            "total_identities": len(self.stored_embeddings),
+            "device": str(self.device),
+            "using_faiss": self.faiss_index is not None,
+            "model_loaded": self.model is not None,
+            "embeddings_path": self.embeddings_path
+        }
+
+
+# Global instance for backward compatibility
+try:
+    recognition_system = FaceRecognitionSystem()
+    model = recognition_system.model
+    stored_embeddings = recognition_system.stored_embeddings
+    preprocess = recognition_system.preprocess
+except Exception as e:
+    logger.error(f"Failed to initialize global recognition system: {e}")
+    recognition_system = None
+
+
+# Backward compatibility functions
+def get_embedding(face_pixels):
+    """Backward compatible embedding generation function"""
+    if recognition_system:
+        return recognition_system.get_embedding(face_pixels)
+    else:
+        logger.error("Recognition system not initialized")
+        return None
+
+
+def predict_face(embedding, stored_embeddings_param=None, threshold=0.6):
+    """Backward compatible prediction function"""
+    if recognition_system:
+        identity, confidence = recognition_system.predict_face(embedding, threshold)
+        return identity
+    else:
+        logger.error("Recognition system not initialized")
+        return "Unknown"
+
+
+def predict_face_with_confidence(embedding, threshold=0.6):
+    """Enhanced prediction function that returns confidence"""
+    if recognition_system:
+        return recognition_system.predict_face(embedding, threshold)
+    else:
         return "Unknown", 0.0
 
 
-def predict_face(embedding, stored_embeddings_param=None, threshold=None):
-    """Legacy API wrapper"""
-    if embedding is None:
-        return "Unknown"
-    identity, confidence = recognizer.recognize_face(embedding, threshold)
-    return identity
+# LFW evaluation utilities
+def evaluate_lfw_pairs(pairs_file: str, images_dir: str,
+                       recognition_sys: FaceRecognitionSystem) -> Dict:
+    """
+    Evaluate system performance on LFW pairs
+
+    Args:
+        pairs_file: Path to LFW pairs file
+        images_dir: Directory containing LFW images
+        recognition_sys: Face recognition system instance
+
+    Returns:
+        Dictionary with evaluation results
+    """
+    try:
+        from sklearn.metrics import roc_curve, auc
+
+        # Load pairs data
+        pairs_data = []
+        with open(pairs_file, 'r') as f:
+            lines = f.readlines()[1:]  # Skip header
+            for line in lines:
+                parts = line.strip().split()
+                if len(parts) == 3:  # Same person
+                    pairs_data.append((parts[0], parts[0], int(parts[1]), int(parts[2]), 1))
+                elif len(parts) == 4:  # Different person
+                    pairs_data.append((parts[0], parts[2], int(parts[1]), int(parts[3]), 0))
+
+        # Calculate similarities
+        similarities = []
+        labels = []
+
+        for person1, person2, img1_num, img2_num, is_same in pairs_data:
+            try:
+                # Load images
+                img1_path = os.path.join(images_dir, person1, f"{person1}_{img1_num:04d}.jpg")
+                img2_path = os.path.join(images_dir, person2, f"{person2}_{img2_num:04d}.jpg")
+
+                if not os.path.exists(img1_path) or not os.path.exists(img2_path):
+                    continue
+
+                img1 = Image.open(img1_path)
+                img2 = Image.open(img2_path)
+
+                # Generate embeddings
+                emb1 = recognition_sys.get_embedding(img1)
+                emb2 = recognition_sys.get_embedding(img2)
+
+                if emb1 is not None and emb2 is not None:
+                    # Calculate similarity (1 - distance)
+                    distance = np.linalg.norm(emb1 - emb2)
+                    similarity = 1.0 - distance
+
+                    similarities.append(similarity)
+                    labels.append(is_same)
+
+            except Exception as e:
+                logger.warning(f"Error processing pair: {e}")
+                continue
+
+        # Calculate ROC curve
+        fpr, tpr, thresholds = roc_curve(labels, similarities)
+        roc_auc = auc(fpr, tpr)
+
+        # Find best threshold
+        best_threshold_idx = np.argmax(tpr - fpr)
+        best_threshold = thresholds[best_threshold_idx]
+
+        # Calculate accuracy at best threshold
+        predictions = [1 if sim > best_threshold else 0 for sim in similarities]
+        accuracy = np.mean([pred == label for pred, label in zip(predictions, labels)])
+
+        return {
+            "accuracy": accuracy,
+            "auc": roc_auc,
+            "best_threshold": best_threshold,
+            "total_pairs": len(pairs_data),
+            "processed_pairs": len(similarities),
+            "fpr": fpr.tolist(),
+            "tpr": tpr.tolist()
+        }
+
+    except Exception as e:
+        logger.error(f"Error in LFW evaluation: {e}")
+        return {"error": str(e)}
 
 
-def get_recognition_metrics():
-    """Get system performance metrics"""
-    return recognizer.get_metrics()
+if __name__ == "__main__":
+    # Example usage
+    try:
+        # Initialize system
+        face_system = FaceRecognitionSystem()
 
+        # Print system stats
+        stats = face_system.get_stats()
+        print("Face Recognition System Statistics:")
+        for key, value in stats.items():
+            print(f"  {key}: {value}")
 
-def add_new_face(identity, face_img):
-    """Add a new face to the recognition system"""
-    embedding = recognizer.get_embedding(face_img)
-    if embedding is not None:
-        return recognizer.add_face_encoding(identity, embedding)
-    return False
+        # Example recognition (if you have a test image)
+        # test_image = Image.open("test_face.jpg")
+        # result = face_system.recognize_face(test_image)
+        # print(f"Recognition result: {result}")
 
-
-logger.info("Enterprise recognition system initialized with lenient thresholds")
+    except Exception as e:
+        print(f"Error: {e}")

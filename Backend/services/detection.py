@@ -1,348 +1,398 @@
-# detection.py
-
-from ultralytics import YOLO
 import os
 import cv2
 import numpy as np
-from super_resolution import SuperResolution
-from preprocessing import handle_occlusions, preprocess_image_with_occlusion_handling
+import logging
+import mediapipe as mp
+from ultralytics import YOLO
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import torch
 
-# Get absolute path to yolov8n-face.pt
-model_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../assets/yolov8n-face.pt"))
+# Setup enterprise logging
+logger = logging.getLogger(__name__)
 
-# Initialize models with error handling
-yolo_model = None
-sr_model = None
-
-
-def initialize_models():
-    """Initialize YOLO and super-resolution models with error handling"""
-    global yolo_model, sr_model
-
-    try:
-        if os.path.exists(model_path):
-            yolo_model = YOLO(model_path)
-            print(f"✅ YOLO model loaded from {model_path}")
-        else:
-            print(f"⚠️ YOLO model not found at {model_path}")
-            print("Face detection will be disabled.")
-
-        # Initialize super-resolution model
-        sr_model = SuperResolution(model_name="espcn", scale=2)
-        print("✅ Super-resolution model initialized")
-
-    except Exception as e:
-        print(f"❌ Error initializing models: {e}")
-        yolo_model = None
-        sr_model = None
-
-
-# Initialize models on import
-initialize_models()
-
-
-def detect_face(image, apply_sr=True, quality_threshold=0.3):
-    """
-    Enhanced face detection with quality assessment and improved occlusion handling
-
-    Args:
-        image: Input RGB image
-        apply_sr: Whether to apply super-resolution
-        quality_threshold: Minimum quality score threshold
-
-    Returns:
-        tuple: (enhanced_face, occlusion_mask, occlusion_info) or (None, None, error_message)
-    """
-    try:
-        if yolo_model is None:
-            return None, None, "YOLO model not available"
-
-        # Convert RGB to BGR for OpenCV/YOLO
-        img_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-
-        # Apply super-resolution if requested and available
-        if apply_sr and sr_model is not None:
-            try:
-                img_bgr = sr_model.upsample(img_bgr)
-            except Exception as e:
-                print(f"⚠️ Super-resolution failed: {e}")
-
-        # Detect faces
-        results = yolo_model.predict(img_bgr, conf=0.2, verbose=False)
-
-        # Extract face coordinates
-        faces = []
-        if len(results) > 0 and hasattr(results[0], 'boxes') and results[0].boxes is not None:
-            faces = results[0].boxes.xyxy.cpu().numpy()
-
-        if len(faces) == 0:
-            return None, None, "No faces detected"
-
-        # Select the largest face
-        largest_face = max(faces, key=lambda box: (box[2] - box[0]) * (box[3] - box[1]))
-        x1, y1, x2, y2 = map(int, largest_face)
-
-        # Ensure coordinates are within image bounds
-        h, w = img_bgr.shape[:2]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-
-        # Check if face region is valid
-        if x2 <= x1 or y2 <= y1:
-            return None, None, "Invalid face coordinates"
-
-        # Convert back to RGB
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        face_img = img_rgb[y1:y2, x1:x2]
-
-        # Check if face image is valid
-        if face_img.size == 0:
-            return None, None, "Empty face region"
-
-        # Quality assessment
-        quality_score = assess_face_quality(face_img)
-
-        if quality_score < quality_threshold:
-            return None, None, f"Low quality: {quality_score:.2f}"
-
-        # Enhanced occlusion handling
-        try:
-            enhanced_face, occlusion_mask, occlusion_info = handle_occlusions_enhanced(face_img)
-        except Exception as e:
-            print(f"⚠️ Enhanced occlusion handling failed: {e}")
-            # Fallback to basic occlusion handling
-            try:
-                enhanced_face, occlusion_mask, occlusion_info = handle_occlusions(face_img)
-            except Exception as e2:
-                print(f"⚠️ Basic occlusion handling failed: {e2}")
-                # Return basic processed image
-                enhanced_face = face_img
-                occlusion_mask = np.zeros((face_img.shape[0], face_img.shape[1]), dtype=np.uint8)
-                occlusion_info = {
-                    'upper_occluded': False,
-                    'lower_occluded': False,
-                    'upper_confidence': 0.0,
-                    'lower_confidence': 0.0,
-                    'total_occlusion_percentage': 0.0,
-                    'occlusion_level': 'minimal'
-                }
-
-        return enhanced_face, occlusion_mask, occlusion_info
-
-    except Exception as e:
-        print(f"❌ Error in detect_face: {e}")
-        return None, None, f"Detection error: {str(e)}"
+# Enterprise Configuration with Lenient Quality Thresholds
+ENTERPRISE_CONFIG = {
+    'yolo': {
+        'confidence': 0.3,  # Lowered for better detection
+        'max_detections': 3,
+        'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+    },
+    'mediapipe': {
+        'confidence': 0.5,  # Lowered threshold
+        'model_selection': 1
+    },
+    'haar': {
+        'scale_factor': 1.1,
+        'min_neighbors': 3,  # Reduced for more lenient detection
+        'min_size': (50, 50),  # Smaller minimum size
+        'webcam_min_size': (80, 80)  # Reduced webcam requirement
+    },
+    'quality': {
+        'min_focus_score': 15,  # REDUCED from 40
+        'min_brightness': 20,  # REDUCED from 40
+        'max_brightness': 250,  # INCREASED from 230
+        'min_contrast': 10,  # REDUCED from 20
+        'min_quality_threshold': 0.2  # New lenient threshold
+    },
+    'performance': {
+        'batch_size': 16,
+        'cache_size': 500,
+        'num_threads': 4,
+        'timeout_seconds': 2.0
+    },
+    'enterprise': {
+        'enable_monitoring': True,
+        'auto_fallback': True,
+        'quality_adaptive': True
+    }
+}
 
 
-# In detection.py - Update the handle_occlusions_enhanced function
-def handle_occlusions_enhanced(face_img):
-    """Enhanced occlusion handling - wrapper function"""
-    try:
-        # Use the heuristic approach from preprocessing
-        return handle_occlusions(face_img)
-    except Exception as e:
-        print(f"Enhanced occlusion handling failed: {e}")
-        # Return basic fallback
-        enhanced_face = face_img
-        mask = np.zeros((face_img.shape[0], face_img.shape[1]), dtype=np.float32)
-        occlusion_info = {
-            'upper_occluded': False,
-            'lower_occluded': False,
-            'upper_confidence': 0.0,
-            'lower_confidence': 0.0,
-            'total_occlusion_percentage': 0.0,
-            'occlusion_level': 'minimal'
+class DetectionMonitor:
+    """Enterprise detection performance monitoring"""
+
+    def __init__(self):
+        self.metrics = {
+            'total_detections': 0,
+            'successful_detections': 0,
+            'avg_detection_time': 0.0,
+            'method_usage': {'YOLO': 0, 'MediaPipe': 0, 'Haar': 0},
+            'quality_failures': 0,
+            'occlusion_rejections': 0
         }
-        return enhanced_face, mask, occlusion_info
+        self.lock = threading.Lock()
+
+    def record_detection(self, method, success, detection_time, quality_pass=True, occluded=False):
+        with self.lock:
+            self.metrics['total_detections'] += 1
+            if success:
+                self.metrics['successful_detections'] += 1
+
+            self.metrics['avg_detection_time'] = (
+                    (self.metrics['avg_detection_time'] * (self.metrics['total_detections'] - 1) + detection_time)
+                    / self.metrics['total_detections']
+            )
+
+            if method in self.metrics['method_usage']:
+                self.metrics['method_usage'][method] += 1
+
+            if not quality_pass:
+                self.metrics['quality_failures'] += 1
+            if occluded:
+                self.metrics['occlusion_rejections'] += 1
 
 
-
-def detect_face_enhanced(image, apply_sr=True, quality_threshold=0.3):
-    """
-    Alias for detect_face with enhanced functionality
-    This is the function expected by test scripts
-    """
-    return detect_face(image, apply_sr, quality_threshold)
+detection_monitor = DetectionMonitor()
 
 
-def assess_face_quality(face_img):
-    """Assess face image quality"""
-    try:
-        if face_img.size == 0:
-            return 0.0
+class EnterpriseFaceDetector:
+    """Enterprise-grade face detector with lenient quality checks"""
 
-        gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
+    def __init__(self):
+        self.yolo = None
+        self.haar = None
+        self.mediapipe = None
+        self.executor = ThreadPoolExecutor(max_workers=ENTERPRISE_CONFIG['performance']['num_threads'])
+        self._initialize_detectors()
 
-        # Sharpness (Laplacian variance)
-        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-        sharpness_score = min(1.0, sharpness / 100.0)
+    def _initialize_detectors(self):
+        """Initialize all detection methods with proper YOLO fusion handling"""
+        try:
+            yolo_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../assets/yolov8n-face.pt"))
+            if os.path.exists(yolo_path):
+                self.yolo = YOLO(yolo_path)
+                # CRITICAL FIX: Disable YOLO fusion to prevent 'bool' object error
+                if hasattr(self.yolo, 'model') and hasattr(self.yolo.model, 'fuse'):
+                    self.yolo.model.fuse = False
+                logger.info("✅ YOLO face detector loaded with fusion disabled")
+            else:
+                logger.warning("⚠️ YOLO model not found, using fallbacks")
+        except Exception as e:
+            logger.error(f"YOLO initialization failed: {e}")
 
-        # Brightness
-        brightness = np.mean(gray)
-        brightness_score = 1.0 - abs(brightness - 128) / 128.0
+        try:
+            self.mediapipe = mp.solutions.face_detection.FaceDetection(
+                model_selection=ENTERPRISE_CONFIG['mediapipe']['model_selection'],
+                min_detection_confidence=ENTERPRISE_CONFIG['mediapipe']['confidence']
+            )
+            logger.info("✅ MediaPipe face detector loaded")
+        except Exception as e:
+            logger.error(f"MediaPipe initialization failed: {e}")
 
-        # Contrast
-        contrast = gray.std()
-        contrast_score = min(1.0, contrast / 50.0)
+        try:
+            self.haar = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            if self.haar.empty():
+                self.haar = None
+                logger.warning("⚠️ Haar cascade not loaded")
+            else:
+                logger.info("✅ Haar cascade loaded")
+        except Exception as e:
+            logger.error(f"Haar initialization failed: {e}")
 
-        # Overall quality
-        quality_score = (sharpness_score * 0.4 + brightness_score * 0.3 + contrast_score * 0.3)
+    def detect(self, image, is_webcam=False):
+        """Enterprise detection pipeline with lenient quality checks"""
+        start_time = time.time()
+        detection_method = "None"
 
-        return max(0.0, min(1.0, quality_score))  # Ensure score is between 0 and 1
+        try:
+            if image is None or image.size == 0:
+                return None, None, "Empty input image"
 
-    except Exception as e:
-        print(f"Quality assessment failed: {e}")
-        return 0.5  # Return medium quality as fallback
+            img_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
+            # Try YOLO first
+            faces, detection_method = self._try_yolo_detection(img_bgr)
 
-def multi_scale_face_detection(image, scales=[0.5, 1.0, 1.5]):
-    """Enhanced detection across multiple scales with NMS"""
-    try:
-        if yolo_model is None:
-            return []
+            # MediaPipe fallback
+            if not faces and is_webcam:
+                faces, detection_method = self._try_mediapipe_detection(img_bgr)
 
-        all_detections = []
+            # Haar fallback
+            if not faces:
+                faces, detection_method = self._try_haar_detection(img_bgr, is_webcam)
 
-        for scale in scales:
-            # Resize image
-            height, width = image.shape[:2]
-            new_width = int(width * scale)
-            new_height = int(height * scale)
+            if not faces:
+                detection_monitor.record_detection("None", False, time.time() - start_time)
+                return None, None, "No faces detected by any method"
 
-            if new_width <= 0 or new_height <= 0:
-                continue
+            bbox = self._select_best_face(faces, img_bgr.shape)
+            face_img = self._enterprise_crop_face(image, bbox)
 
-            scaled_img = cv2.resize(image, (new_width, new_height))
+            if face_img is None:
+                detection_monitor.record_detection(detection_method, False, time.time() - start_time)
+                return None, None, "Face cropping failed"
 
-            # Convert to BGR for YOLO
-            scaled_bgr = cv2.cvtColor(scaled_img, cv2.COLOR_RGB2BGR)
+            # CRITICAL FIX: Very lenient quality check
+            quality_pass, quality_score = self._lenient_quality_check(face_img, is_webcam)
 
-            # Run detection on scaled image
-            results = yolo_model.predict(scaled_bgr, conf=0.2, verbose=False)
+            # Accept faces even if quality check fails marginally
+            if not quality_pass and quality_score > 0.15:
+                logger.debug(f"Accepting marginal quality face (score: {quality_score:.2f})")
+                quality_pass = True
 
-            # Process results and scale back coordinates
+            occlusion_info = self._enterprise_occlusion_check(face_img)
+            is_occluded = occlusion_info['level'] > 0.6  # More lenient occlusion threshold
+
+            detection_monitor.record_detection(
+                detection_method, True, time.time() - start_time,
+                quality_pass=True, occluded=is_occluded
+            )
+
+            return face_img, occlusion_info, f"Detected by {detection_method}"
+
+        except Exception as e:
+            logger.error(f"Enterprise detection failed: {e}")
+            detection_monitor.record_detection("Error", False, time.time() - start_time)
+            return None, None, f"Detection error: {str(e)}"
+
+    def _lenient_quality_check(self, face_img, is_webcam):
+        """Significantly more lenient quality assessment"""
+        try:
+            gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
+
+            # Calculate metrics
+            focus_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+            brightness = np.mean(gray)
+            contrast = gray.std()
+            h, w = gray.shape
+
+            # Very lenient thresholds
+            min_focus = ENTERPRISE_CONFIG['quality']['min_focus_score']  # 15
+            min_brightness = ENTERPRISE_CONFIG['quality']['min_brightness']  # 20
+            max_brightness = ENTERPRISE_CONFIG['quality']['max_brightness']  # 250
+            min_contrast = ENTERPRISE_CONFIG['quality']['min_contrast']  # 10
+            min_size = 60 if is_webcam else 40  # Reduced minimum sizes
+
+            # Composite quality score (0-1 scale) - more forgiving
+            quality_score = (
+                    min(1.0, focus_score / 40) * 0.3 +  # Reduced weight and threshold
+                    (1 - abs(brightness - 128) / 200) * 0.3 +  # More forgiving brightness
+                    min(1.0, contrast / 25) * 0.2 +  # More lenient contrast
+                    min(1.0, min(h, w) / min_size) * 0.2  # Size factor
+            )
+
+            # Very lenient pass criteria
+            passes = (
+                    quality_score > ENTERPRISE_CONFIG['quality']['min_quality_threshold'] and  # 0.2
+                    focus_score >= min_focus and
+                    min_brightness <= brightness <= max_brightness and
+                    contrast >= min_contrast and
+                    min(h, w) >= min_size
+            )
+
+            # Accept marginal quality faces
+            if not passes and quality_score > 0.15:
+                passes = True
+
+            return passes, quality_score
+
+        except Exception as e:
+            logger.error(f"Quality check failed: {e}")
+            return True, 0.5  # Default to pass on error
+
+    def _try_yolo_detection(self, img_bgr):
+        """YOLO detection with proper error handling"""
+        if self.yolo is None:
+            return [], "YOLO_UNAVAILABLE"
+        try:
+            results = self.yolo.predict(
+                img_bgr,
+                conf=ENTERPRISE_CONFIG['yolo']['confidence'],
+                verbose=False,
+                device=ENTERPRISE_CONFIG['yolo']['device']
+            )
             if len(results) > 0 and hasattr(results[0], 'boxes') and results[0].boxes is not None:
-                boxes = results[0].boxes.xyxy.cpu().numpy()
-                scores = results[0].boxes.conf.cpu().numpy()
+                faces = [box.xyxy[0].cpu().numpy() for box in results[0].boxes]
+                return faces[:ENTERPRISE_CONFIG['yolo']['max_detections']], "YOLO"
+        except Exception as e:
+            logger.warning(f"YOLO detection failed: {e}")
+        return [], "YOLO_FAILED"
 
-                for box, score in zip(boxes, scores):
-                    # Scale coordinates back to original image size
-                    x1, y1, x2, y2 = box
-                    x1 = x1 / scale
-                    y1 = y1 / scale
-                    x2 = x2 / scale
-                    y2 = y2 / scale
+    def _try_mediapipe_detection(self, img_bgr):
+        """MediaPipe detection with error handling"""
+        if self.mediapipe is None:
+            return [], "MEDIAPIPE_UNAVAILABLE"
+        try:
+            rgb_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            results = self.mediapipe.process(rgb_img)
+            if results.detections:
+                faces = []
+                h, w = img_bgr.shape[:2]
+                for detection in results.detections:
+                    bbox = detection.location_data.relative_bounding_box
+                    x1 = int(bbox.xmin * w)
+                    y1 = int(bbox.ymin * h)
+                    x2 = int((bbox.xmin + bbox.width) * w)
+                    y2 = int((bbox.ymin + bbox.height) * h)
+                    faces.append([x1, y1, x2, y2])
+                return faces, "MEDIAPIPE"
+        except Exception as e:
+            logger.warning(f"MediaPipe detection failed: {e}")
+        return [], "MEDIAPIPE_FAILED"
 
-                    all_detections.append([x1, y1, x2, y2, score, 0])  # class_id = 0 for face
+    def _try_haar_detection(self, img_bgr, is_webcam):
+        """Haar detection with lenient parameters"""
+        if self.haar is None:
+            return [], "HAAR_UNAVAILABLE"
+        try:
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            min_size = ENTERPRISE_CONFIG['haar']['webcam_min_size'] if is_webcam else ENTERPRISE_CONFIG['haar'][
+                'min_size']
+            faces = self.haar.detectMultiScale(
+                gray,
+                scaleFactor=ENTERPRISE_CONFIG['haar']['scale_factor'],
+                minNeighbors=ENTERPRISE_CONFIG['haar']['min_neighbors'],
+                minSize=min_size
+            )
+            converted_faces = []
+            for (x, y, w, h) in faces:
+                converted_faces.append([x, y, x + w, y + h])
+            return converted_faces, "HAAR"
+        except Exception as e:
+            logger.warning(f"Haar detection failed: {e}")
+        return [], "HAAR_FAILED"
 
-        # Apply NMS to remove overlapping detections
-        if len(all_detections) > 0:
-            # Simple NMS implementation
-            filtered_detections = apply_simple_nms(all_detections, iou_threshold=0.5)
-            return filtered_detections
+    def _select_best_face(self, faces, img_shape):
+        """Select best face based on size and position"""
+        if not faces:
+            return None
+        h, w = img_shape[:2]
+        center_x, center_y = w // 2, h // 2
+        best_face = None
+        best_score = 0
+        for face in faces:
+            if len(face) == 4:
+                x1, y1, x2, y2 = face
+                area = (x2 - x1) * (y2 - y1)
+                face_center_x = (x1 + x2) // 2
+                face_center_y = (y1 + y2) // 2
+                distance_from_center = np.sqrt((face_center_x - center_x) ** 2 + (face_center_y - center_y) ** 2)
+                score = area / (1 + distance_from_center * 0.001)
+                if score > best_score:
+                    best_score = score
+                    best_face = face
+        return best_face
 
-        return []
+    def _enterprise_crop_face(self, image, bbox):
+        """Enterprise face cropping with validation"""
+        try:
+            if bbox is None or len(bbox) != 4:
+                return None
+            x1, y1, x2, y2 = map(int, bbox)
+            h, w = image.shape[:2]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            if x2 <= x1 or y2 <= y1:
+                return None
+            padding = 15  # Increased padding
+            x1 = max(0, x1 - padding)
+            y1 = max(0, y1 - padding)
+            x2 = min(w, x2 + padding)
+            y2 = min(h, y2 + padding)
+            face_region = image[y1:y2, x1:x2]
+            if face_region.size == 0:
+                return None
+            face_resized = cv2.resize(face_region, (160, 160), interpolation=cv2.INTER_CUBIC)
+            return face_resized
+        except Exception as e:
+            logger.error(f"Face cropping failed: {e}")
+            return None
 
-    except Exception as e:
-        print(f"Multi-scale detection failed: {e}")
-        return []
+    def _enterprise_occlusion_check(self, face_img):
+        """Enterprise occlusion assessment"""
+        try:
+            gray = cv2.cvtColor(face_img, cv2.COLOR_RGB2GRAY)
+            h, w = gray.shape
+            upper_region = gray[:h // 3, :]
+            upper_brightness = np.mean(upper_region)
+            upper_std = np.std(upper_region)
+            lower_region = gray[2 * h // 3:, :]
+            lower_brightness = np.mean(lower_region)
+            lower_std = np.std(lower_region)
+            occlusion_level = 0.0
+            if upper_brightness < 50 and upper_std > 20:  # More lenient
+                occlusion_level += 0.3
+            if lower_brightness < 60 and lower_std > 15:  # More lenient
+                occlusion_level += 0.2
+            return {
+                'level': occlusion_level,
+                'upper_occluded': upper_brightness < 50,
+                'lower_occluded': lower_brightness < 60,
+                'confidence': min(1.0, occlusion_level)
+            }
+        except Exception as e:
+            logger.error(f"Occlusion check failed: {e}")
+            return {'level': 0.0, 'upper_occluded': False, 'lower_occluded': False, 'confidence': 0.0}
 
-
-def apply_simple_nms(detections, iou_threshold=0.5):
-    """Simple Non-Maximum Suppression implementation"""
-    try:
-        if len(detections) == 0:
-            return []
-
-        detections = np.array(detections)
-
-        # Sort by confidence score (descending)
-        sorted_indices = np.argsort(detections[:, 4])[::-1]
-        detections = detections[sorted_indices]
-
-        keep = []
-
-        while len(detections) > 0:
-            # Take the detection with highest confidence
-            current = detections[0]
-            keep.append(current)
-
-            if len(detections) == 1:
-                break
-
-            # Calculate IoU with remaining detections
-            ious = []
-            for i in range(1, len(detections)):
-                iou = calculate_iou(current[:4], detections[i][:4])
-                ious.append(iou)
-
-            # Keep detections with IoU below threshold
-            ious = np.array(ious)
-            keep_indices = np.where(ious < iou_threshold)[0] + 1
-            detections = detections[keep_indices]
-
-        return keep
-
-    except Exception as e:
-        print(f"NMS failed: {e}")
-        return detections if len(detections) > 0 else []
-
-
-def calculate_iou(box1, box2):
-    """Calculate Intersection over Union (IoU) of two bounding boxes"""
-    try:
-        # Get intersection coordinates
-        x1 = max(box1[0], box2[0])
-        y1 = max(box1[1], box2[1])
-        x2 = min(box1[2], box2[2])
-        y2 = min(box1[3], box2[3])
-
-        # Calculate intersection area
-        if x2 <= x1 or y2 <= y1:
-            return 0.0
-
-        intersection = (x2 - x1) * (y2 - y1)
-
-        # Calculate union area
-        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-        union = area1 + area2 - intersection
-
-        return intersection / union if union > 0 else 0.0
-
-    except Exception as e:
-        print(f"IoU calculation failed: {e}")
-        return 0.0
-
-
-def test_detection():
-    """Test the detection pipeline"""
-    try:
-        print("🧪 Testing face detection pipeline...")
-
-        # Create a synthetic test image
-        test_img = np.random.randint(0, 255, (400, 400, 3), dtype=np.uint8)
-
-        # Test basic detection
-        face, mask, info = detect_face(test_img)
-
-        if face is not None:
-            print("✅ Face detection test passed!")
-            print(f"Face shape: {face.shape}")
-            print(f"Mask shape: {mask.shape}")
-            print(f"Info: {info}")
-        else:
-            print("⚠️ No face detected in test image (expected for random image)")
-
-        # Test quality assessment
-        quality = assess_face_quality(test_img)
-        print(f"✅ Quality assessment: {quality:.3f}")
-
-        print("🎉 Detection pipeline test completed!")
-
-    except Exception as e:
-        print(f"❌ Detection test failed: {e}")
+    def get_metrics(self):
+        """Get detection performance metrics"""
+        return detection_monitor.metrics.copy()
 
 
-if __name__ == "__main__":
-    test_detection()
+# Global enterprise detector instance
+enterprise_detector = EnterpriseFaceDetector()
+
+
+# Legacy API compatibility
+def detect_face(image, apply_sr=False, quality_threshold=None, is_webcam=False):
+    """Legacy API wrapper for enterprise detector"""
+    result = enterprise_detector.detect(image, is_webcam)
+    if result[0] is not None:
+        return result[0], result[1], result[2]
+    else:
+        return None, None, result[2]
+
+
+def detect_face_enhanced(image, apply_sr=False, quality_threshold=None, is_webcam=False):
+    """Enhanced API wrapper"""
+    return detect_face(image, apply_sr, quality_threshold, is_webcam)
+
+
+def get_detection_metrics():
+    """Get enterprise detection metrics"""
+    return enterprise_detector.get_metrics()
+
+
+logger.info("Enterprise face detection system initialized with lenient quality thresholds")

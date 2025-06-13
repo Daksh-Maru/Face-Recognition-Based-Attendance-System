@@ -1,3 +1,4 @@
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 import crud, database, schema
@@ -7,7 +8,7 @@ from services.detection import detect_face
 import pickle
 import os
 from datetime import datetime
-from database import get_db 
+from database import get_db
 
 router = APIRouter(tags=["Attendance"])
 

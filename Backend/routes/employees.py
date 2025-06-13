@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
-from database import get_db 
+from database import get_db
 import crud, schema, database
 
 router = APIRouter(tags=["Employees"])  # This helps group routes in Swagger UI

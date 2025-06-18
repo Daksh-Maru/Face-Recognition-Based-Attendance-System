@@ -1,40 +1,61 @@
-import React,{useState,useEffect} from 'react'
+import React, { useState, useEffect } from 'react';
+import api from '../api';
 
-function Profile_content() {
-    const [employee, setEmployee] = useState(null);
+function Profile_content({ employeeId }) {
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-    useEffect(() => {
-        const fetchEmployee = async () => {
-          try {
-            const res = await axios.get('http://localhost:5000/api/employee/profile');
-            setEmployee(res.data);
-          } catch (err) {
-            console.error('Error fetching employee profile:', err);
-          }
-        };
-    
-        fetchEmployee();
-      }, []);
-    
-      if (!employee) {
-        return <div className="p-4">Loading profile...</div>;
+  useEffect(() => {
+    if (!employeeId) return;
+
+    const fetchProfile = async () => {
+      setLoading(true);
+      try {
+        // Fetch employee profile by ID
+        const res = await api.get(`attendance/employee/${employeeId}`);
+        // /attendance/employee/${ employeeId }
+
+        // Assuming res.data is an array with at least one object
+        if (res.data.length > 0) {
+          const { employee_name, employee_id, image_path } = res.data[0];
+          setProfile({
+            name: employee_name,
+            id: employee_id,
+            image: image_path,
+          });
+        } else {
+          setProfile(null);
+        }
+      } catch (error) {
+        console.error('Error fetching employee profile:', error);
+        setProfile(null);
+      } finally {
+        setLoading(false);
       }
+    };
+
+    fetchProfile();
+  }, [employeeId]);
+
+  if (loading) {
+    return <div className="p-4">Loading profile...</div>;
+  }
+
+  if (!profile) {
+    return <div className="p-4">No profile found for employee ID: {employeeId}</div>;
+  }
+
   return (
-        <div className="absolute top-0 left-0 p-15">
-            <div className="flex flex-col items-start">
-            <img
-            src={employee.image || "URL"}
-            alt="Employee"
-            className="w-48 h-48 object-cover rounded-xl shadow-md"
-            />
-            <div className="mt-4">
-            <h2 className="text-xl font-semibold flex">Name of the Employee</h2>
-            <p className="text-gray-600 flex">Employee ID</p>
-            </div>
-        </div>
+    <div className="p-4 flex flex-col items-center space-y-4">
+      <img
+        src={profile.image || ''}
+        className="w-40 h-40 rounded-full border-2 border-gray-300 object-cover shadow-md"
+        alt={`${profile.name}'s profile`}
+      />
+      <h2 className="text-2xl font-bold">{profile.name}</h2>
+      <p className="text-gray-400 text-lg">Employee ID: {profile.id}</p>
     </div>
-    
-  )
+  );
 }
 
-export default Profile_content
+export default Profile_content;

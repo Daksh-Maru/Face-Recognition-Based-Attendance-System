@@ -116,7 +116,7 @@ class FaceRecognizer:
                 confidence = 1.0 - (distance / self.threshold)
                 return pid, float(confidence)  # Ensure float return
 
-            return "Unknown", 0.0
+            return "Unknown", 0.0   
 
         except Exception as e:
             logger.error(f"Recognition failed: {e}")

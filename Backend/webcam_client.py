@@ -6,10 +6,10 @@ from datetime import datetime
 from io import BytesIO
 import sys
 
-# ✅ Include backend path
+# Include backend path
 sys.path.append("Backend")  # Update path to match your structure
 
-# ✅ Import your own detection and preprocessing functions
+# Import your own detection and preprocessing functions
 from services.detection import detect_face
 from services.utils import preprocess_face
 
@@ -38,22 +38,22 @@ while True:
 
         try:
             identity = response.json().get("identity", "Unknown")
-            print(f"🧠 Recognized: {identity}")
+            print(f"Recognized: {identity}")
 
             # Detect face locally for saving
             face = detect_face(frame)
 
             if face is None:
-                print("⚠️ No face detected locally. Skipping save.")
+                print("No face detected locally. Skipping save.")
                 continue
 
             # Ask for new employee if unknown
             if identity == "Unknown":
-                register = input("❓ Unknown face detected. Register this person? (y/n): ").strip().lower()
+                register = input("Unknown face detected. Register this person? (y/n): ").strip().lower()
                 if register == 'y':
-                    identity = input("👤 Enter the new employee name: ").strip()
+                    identity = input("Enter the new employee name: ").strip()
                 else:
-                    print("⛔ Skipping image save.")
+                    print("Skipping image save.")
                     continue
 
             # Preprocess face using your logic
@@ -72,10 +72,10 @@ while True:
 
             # Save image (convert RGB to BGR for OpenCV)
             cv2.imwrite(filepath, cv2.cvtColor(normalized_img, cv2.COLOR_RGB2BGR))
-            print(f"✅ Saved preprocessed image to: {filepath}")
+            print(f"Saved preprocessed image to: {filepath}")
 
         except Exception as e:
-            print("❌ Error:", e)
+            print("Error:", e)
 
     elif key == ord('q'):
         break

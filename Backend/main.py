@@ -1,3 +1,5 @@
+import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routes import attendance, employees, recognize  # Ensure naming is consistent!

@@ -1,84 +1,90 @@
+import os
+import sys
 import cv2
 import numpy as np
 import requests
-import os
 from datetime import datetime
-from io import BytesIO
-import sys
 
-# Include backend path
-sys.path.append("Backend")  # Update path to match your structure
+# Ensure backend services are on the Python path
+sys.path.append("Backend")  # Maintains existing project structure [6]
 
-# Import your own detection and preprocessing functions
 from services.detection import detect_face
 from services.utils import preprocess_face
 
 API_URL = "http://localhost:8000/recognize"
 DATASET_DIR = "dataset"
 
-os.makedirs(DATASET_DIR, exist_ok=True)
-cap = cv2.VideoCapture(0)
+os.makedirs(DATASET_DIR, exist_ok=True)  # Create dataset directory if missing [3]
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+def main():
+    cap = cv2.VideoCapture(0)  # Open default webcam [1]
+    if not cap.isOpened():
+        print("Error: Cannot access webcam")
+        return
 
-    cv2.imshow("Press 'r' to recognize, 'q' to quit", frame)
-    key = cv2.waitKey(1) & 0xFF
+    print("Press 'r' to recognize and save, 'q' to quit")
 
-    if key == ord('r'):
-        # Encode full frame and send to API
-        _, img_encoded = cv2.imencode('.jpg', frame)
-        img_bytes = img_encoded.tobytes()
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Error: Frame capture failed")
+            break
 
-        response = requests.post(API_URL, files={
-            "file": ("frame.jpg", img_bytes, "image/jpeg")
-        })
+        cv2.imshow("Webcam – Press 'r' to recognize, 'q' to quit", frame)
+        key = cv2.waitKey(1) & 0xFF
 
-        try:
-            identity = response.json().get("identity", "Unknown")
+        if key == ord('r'):
+            # Encode frame as JPEG
+            _, img_encoded = cv2.imencode('.jpg', frame)
+            img_bytes = img_encoded.tobytes()
+
+            # Send to recognition API
+            try:
+                response = requests.post(API_URL, files={
+                    "file": ("frame.jpg", img_bytes, "image/jpeg")
+                })  # Multipart upload [2]
+                identity = response.json().get("identity", "Unknown")
+            except Exception as e:
+                print(f"Recognition API error: {e}")
+                continue
+
             print(f"Recognized: {identity}")
 
-            # Detect face locally for saving
-            face = detect_face(frame)
-
-            if face is None:
+            # Local face detection
+            face_crop = detect_face(frame)
+            if face_crop is None:
                 print("No face detected locally. Skipping save.")
                 continue
 
-            # Ask for new employee if unknown
+            # Register new identity if unknown
             if identity == "Unknown":
-                register = input("Unknown face detected. Register this person? (y/n): ").strip().lower()
-                if register == 'y':
-                    identity = input("Enter the new employee name: ").strip()
+                ans = input("Unknown face. Register? (y/n): ").strip().lower()
+                if ans == 'y':
+                    identity = input("Enter new name: ").strip()
                 else:
-                    print("Skipping image save.")
                     continue
 
-            # Preprocess face using your logic
-            processed_np = preprocess_face(face)
+            # Preprocess and normalize face image
+            processed = preprocess_face(face_crop)
+            norm = ((processed - processed.min()) /
+                    (processed.max() - processed.min()) * 255).astype(np.uint8)
 
-            # Normalize float image to 0-255 for saving
-            normalized_img = ((processed_np - processed_np.min()) / (processed_np.max() - processed_np.min()) * 255).astype(np.uint8)
-
-            # Create folder if doesn't exist
-            person_folder = os.path.join(DATASET_DIR, identity)
-            os.makedirs(person_folder, exist_ok=True)
-
+            # Prepare output path
+            person_dir = os.path.join(DATASET_DIR, identity)
+            os.makedirs(person_dir, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{identity}_{timestamp}.jpg"
-            filepath = os.path.join(person_folder, filename)
+            filepath = os.path.join(person_dir, filename)
 
-            # Save image (convert RGB to BGR for OpenCV)
-            cv2.imwrite(filepath, cv2.cvtColor(normalized_img, cv2.COLOR_RGB2BGR))
-            print(f"Saved preprocessed image to: {filepath}")
+            # Save BGR image for OpenCV compatibility
+            cv2.imwrite(filepath, cv2.cvtColor(norm, cv2.COLOR_RGB2BGR))
+            print(f"Saved preprocessed image: {filepath}")
 
-        except Exception as e:
-            print("Error:", e)
+        elif key == ord('q'):
+            break
 
-    elif key == ord('q'):
-        break
+    cap.release()
+    cv2.destroyAllWindows()
 
-cap.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()

@@ -83,18 +83,6 @@ function App() {
 export default App;
 ```
 
-### Application Routing Overview
-
-```mermaid
-flowchart TD
-    A[App.jsx] --> B[Route "/"]
-    A --> C[Route "/profile/:employeeId"]
-    B --> D[Home.jsx]
-    C --> E[Profile.jsx]
-```
-
----
-
 ## api.js
 
 This module sets up and exports an Axios instance for communicating with the backend API.

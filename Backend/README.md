@@ -1,125 +1,519 @@
-# Backend README
+# Face Recognition Attendance System – Backend Documentation
 
-This document describes the `Backend` folder for the Face-Recognition-Based-Attendance-System project. It explains the purpose of each file and folder, setup steps and how to run the backend.
+This backend powers a facial recognition-based employee attendance system using FastAPI, SQLAlchemy, and state-of-the-art face detection and recognition models. It exposes HTTP APIs, database utilities, and model-driven face processing pipelines.
 
-## Project overview
+---
 
-The backend provides the API and utilities for face embedding extraction, storage, and attendance functionality. It integrates a database, face models, dataset utilities and a simple client for webcam capture.
+## 🗂️ File & Module Overview
 
-## Repository structure (inside `Backend`)
+| File/Folder              | Purpose                                                                                     |
+|------------------------- |--------------------------------------------------------------------------------------------|
+| `main.py`                | FastAPI application entrypoint and API router inclusion.                                   |
+| `models.py`              | SQLAlchemy ORM models for Employees and Attendance.                                        |
+| `schema.py`              | Pydantic schemas for API validation and serialization.                                     |
+| `crud.py`                | CRUD functions for Employee and Attendance database interactions.                          |
+| `database.py`            | Database connection setup, session factory, and dependency.                                |
+| `attendance.py`          | Attendance API endpoints (create, read, delete, stats).                                    |
+| `employees.py`           | Employee management API (create, list, get-by-ID).                                         |
+| `recognize.py`           | Face recognition API endpoint.                                                             |
+| `generate_embeddings.py` | Script to generate and save face embeddings from a dataset using deep models.              |
+| `process_in_place.py`    | Utility for in-place image preprocessing across datasets.                                  |
+| `preprocessing.py`       | Image enhancement functions (CLAHE, gamma, denoise, sharpen, etc.).                        |
+| `detection.py`           | Face detection using YOLOv8.                                                               |
+| `utils.py`               | Image I/O and face preprocessing utilities.                                                |
+| `super_resolution.py`    | Super-resolution model wrapper for image upscaling.                                        |
+| `simple_recognition.py`  | Lightweight face embedding extraction (for simple/fast use cases).                         |
+| `fix_dataset_faces.py`   | Cleans and crops all faces in the dataset for uniformity and quality.                      |
+| `webcam_client.py`       | Command-line webcam client for real-time recognition and user dataset expansion.           |
+| `create_db.py`           | Script to (re)create and initialize the database schema.                                   |
+| `requirements.txt`       | Python dependencies required for backend operation.                                        |
+| `.env`                   | Stores DB credentials and environment variables.                                           |
+| `.python-version`        | Python version lock file.                                                                  |
+| `README.md`              | Main documentation file.                                                                   |
 
-- `create_db.py`  
-  - Utility script to (re)create and initialize the database schema and sample data. Typically imports `database.py`, `models.py`, and runs table creation routines.
+---
 
-- `crud.py`  
-  - Contains Create/Read/Update/Delete database functions used by the API or background utilities. Handles operations such as adding users, embeddings, marking attendance, and querying records.
+## 🚀 FastAPI Application (`main.py`)
 
-- `database.py`  
-  - Database connection and session factory. Likely reads the `DATABASE_URL` from `Backend/.env` or environment variables and exposes a session/engine for SQLAlchemy.
+The backend launches a FastAPI app, exposes RESTful APIs, and enables CORS for local frontend access.
 
-- `fix_dataset_faces.py`  
-  - Utility to clean/normalize the `dataset` image folders, detect and fix face crop issues or filenames. Used to prepare the dataset used to compute embeddings.
+```python
+from fastapi import FastAPI
 
-- `main.py`  
-  - The main application entry point (likely a FastAPI or Flask app). Defines the API endpoints, mounts routes and starts the app. Can be started with a WSGI server (e.g. `uvicorn`) or run directly if it contains a runnable block.
+app = FastAPI(
+    title="Face Recognition Attendance System",
+    description="An API to manage attendance using facial recognition.",
+    version="1.0.0"
+)
+# Routers: employees, attendance, recognize
+```
 
-- `models.py`  
-  - Database model definitions (SQLAlchemy ORM models). Defines tables such as users, embeddings, attendance logs, etc.
+### Root Endpoint
 
-- `schema.py`  
-  - Pydantic schemas / request\response models used by the API to validate and serialize data.
+```api
+{
+    "title": "Welcome Message",
+    "description": "Returns a welcome message for API health check.",
+    "method": "GET",
+    "baseUrl": "http://localhost:8000",
+    "endpoint": "/",
+    "headers": [],
+    "bodyType": "none",
+    "requestBody": "",
+    "responses": {
+        "200": {
+            "description": "Welcome message",
+            "body": "{\"message\": \"Welcome to the Attendance Management System\"}"
+        }
+    }
+}
+```
 
-- `webcam_client.py`  
-  - A simple client to capture frames from a webcam and send them to the backend for recognition or registration. Useful for manual testing or demoing the system.
+---
 
-- `requirements.txt`  
-  - Python dependencies required to run the backend. Install with:
-    - `pip install -r Backend/requirements.txt`
+## 👤 Employee Management API (`employees.py`)
 
-- `__pycache__/`  
-  - Compiled Python bytecode files generated during execution. No source changes needed here.
+Handles employee creation, retrieval, and listing.
 
-### `assets/` (important runtime files)
-- `assets/class_labels.pkl`  
-  - Serialized mapping of class indices to person names (used for recognition labeling).
+### Create Employee
 
-- `assets/embeddings.pkl`  
-  - Precomputed face embeddings for known people. Used to speed up recognition queries.
+```api
+{
+    "title": "Create Employee",
+    "description": "Registers a new employee by name and email.",
+    "method": "POST",
+    "baseUrl": "http://localhost:8000",
+    "endpoint": "/employees/",
+    "headers": [
+        {
+            "key": "Content-Type",
+            "value": "application/json",
+            "required": true
+        }
+    ],
+    "bodyType": "json",
+    "requestBody": "{ \"name\": \"Alice Smith\", \"email\": \"alice@example.com\" }",
+    "responses": {
+        "201": {
+            "description": "Employee created",
+            "body": "{ \"id\": 1, \"name\": \"Alice Smith\", \"email\": \"alice@example.com\" }"
+        },
+        "400": {
+            "description": "Duplicate email",
+            "body": "{ \"detail\": \"Email already registered\" }"
+        }
+    }
+}
+```
 
-- `assets/facenet_keras.h5`  
-  - FaceNet Keras model used to compute face embeddings from aligned face crops.
+### Get Employee by ID
 
-- `assets/yolov8n-face.pt`  
-  - YOLOv8 face detection model weights used for detecting faces in images/frames.
+```api
+{
+    "title": "Get Employee By ID",
+    "description": "Retrieve employee details by unique ID.",
+    "method": "GET",
+    "baseUrl": "http://localhost:8000",
+    "endpoint": "/employees/{employee_id}",
+    "pathParams": [
+        { "key": "employee_id", "value": "Employee's unique DB ID", "required": true }
+    ],
+    "bodyType": "none",
+    "requestBody": "",
+    "responses": {
+        "200": {
+            "description": "Employee found",
+            "body": "{ \"id\": 1, \"name\": \"Alice Smith\", \"email\": \"alice@example.com\" }"
+        },
+        "404": {
+            "description": "Not found",
+            "body": "{ \"detail\": \"Employee not found\" }"
+        }
+    }
+}
+```
 
-> Note: These files are large and required for face detection/embedding. Keep them in `assets` for runtime.
+### List All Employees
 
-### `dataset/`
-- Folder containing subfolders per identity (e.g. `dataset/Aaron_Eckhart/`, `dataset/Aaron_Sorkin/`, ...).  
-- Each identity folder contains images used to compute embeddings and to build the recognition database. Use `fix_dataset_faces.py` to prepare this dataset.
+```api
+{
+    "title": "List All Employees",
+    "description": "Lists all employees in the system.",
+    "method": "GET",
+    "baseUrl": "http://localhost:8000",
+    "endpoint": "/employees/",
+    "bodyType": "none",
+    "requestBody": "",
+    "responses": {
+        "200": {
+            "description": "List of employees",
+            "body": "[ { \"id\": 1, \"name\": \"Alice Smith\", \"email\": \"alice@example.com\" }, ... ]"
+        }
+    }
+}
+```
 
-### `dataset_backup_20250613_003430/`
-- Backup copy of the dataset (timestamped). Useful for restoring original data or auditing dataset changes.
+---
 
-### `routes/` and `services/` (if present)
-- `routes/`  
-  - If implemented, contains modular route definitions for the API (e.g. `auth.py`, `attendance.py`, `recognition.py`).
+## 🕒 Attendance API (`attendance.py`)
 
-- `services/`  
-  - Business logic separate from routes/crud, such as face processing pipelines, model inference wrappers, or background tasks.
+Supports creating, querying, and deleting attendance records, with stats endpoints.
 
-### `Backend/.env`
-- Environment file that stores `DATABASE_URL` and other environment variables used by `database.py`. Do not commit secrets to VCS. Update this file for your local DB credentials.
+### Create Attendance Record
 
-## Setup
+```api
+{
+    "title": "Create Attendance",
+    "description": "Create a new attendance record for an employee (requires employee_id and image_path).",
+    "method": "POST",
+    "baseUrl": "http://localhost:8000",
+    "endpoint": "/attendance/",
+    "headers": [
+        { "key": "Content-Type", "value": "application/json", "required": true }
+    ],
+    "bodyType": "json",
+    "requestBody": "{ \"employee_id\": 1, \"image_path\": \"uploads/alice_20240612.jpg\" }",
+    "responses": {
+        "201": {
+            "description": "Attendance record created",
+            "body": "{ \"id\": 5, \"employee_id\": 1, \"image_path\": \"uploads/alice_20240612.jpg\", \"time_in\": \"2024-06-12T08:30:12\" }"
+        },
+        "404": {
+            "description": "Employee not found",
+            "body": "{ \"detail\": \"Employee with ID 1 not found\" }"
+        }
+    }
+}
+```
 
-1. Create a Python virtual environment (recommended):
-   - `python -m venv .venv`
-   - `.\.venv\Scripts\activate` (Windows)
+### Get Attendance by Date
 
-2. Install dependencies:
-   - `pip install -r Backend/requirements.txt`
+```api
+{
+    "title": "Get Attendance by Date",
+    "description": "Retrieves all attendance records for a given date (YYYY-MM-DD).",
+    "method": "GET",
+    "baseUrl": "http://localhost:8000",
+    "endpoint": "/attendance/by-date/{date}",
+    "pathParams": [
+        { "key": "date", "value": "Date in YYYY-MM-DD", "required": true }
+    ],
+    "bodyType": "none",
+    "requestBody": "",
+    "responses": {
+        "200": {
+            "description": "Attendance records for date",
+            "body": "[ { \"id\": 5, \"employee_id\": 1, \"employee_name\": \"Alice Smith\", \"image_path\": \"uploads/alice_20240612.jpg\", \"time_in\": \"2024-06-12T08:30:12\" } ]"
+        },
+        "400": {
+            "description": "Invalid date format",
+            "body": "{ \"detail\": \"Invalid date format. Use YYYY-MM-DD\" }"
+        }
+    }
+}
+```
 
-3. Configure environment:
-   - Copy `Backend/.env` or set environment variables for `DATABASE_URL` and other secrets. Ensure the Postgres server and the configured database `attendance_db` exist (or adjust settings accordingly).
+### Get Today's Attendance
 
-4. Initialize the database:
-   - Run `python Backend/create_db.py` (or run the appropriate initialization routine in `main.py`).
+```api
+{
+    "title": "Get Today's Attendance",
+    "description": "Lists all attendance records for the current day.",
+    "method": "GET",
+    "baseUrl": "http://localhost:8000",
+    "endpoint": "/attendance/today",
+    "bodyType": "none",
+    "requestBody": "",
+    "responses": {
+        "200": {
+            "description": "Today's attendance records",
+            "body": "[ ... ]"
+        }
+    }
+}
+```
 
-## Run the backend
+### Get Employee Attendance History
 
-- Typical FastAPI start (if `main.py` exposes `app`):
-  - `uvicorn Backend.main:app --reload --host 0.0.0.0 --port 8000`
+```api
+{
+    "title": "Get Employee Attendance History",
+    "description": "Returns attendance records for a given employee, with optional date filtering and pagination.",
+    "method": "GET",
+    "baseUrl": "http://localhost:8000",
+    "endpoint": "/attendance/employee/{employee_id}",
+    "pathParams": [
+        { "key": "employee_id", "value": "Employee's unique DB ID", "required": true }
+    ],
+    "queryParams": [
+        { "key": "start_date", "value": "YYYY-MM-DD", "required": false },
+        { "key": "end_date", "value": "YYYY-MM-DD", "required": false },
+        { "key": "limit", "value": "Max records", "required": false },
+        { "key": "skip", "value": "Records to skip", "required": false }
+    ],
+    "bodyType": "none",
+    "requestBody": "",
+    "responses": {
+        "200": {
+            "description": "Employee attendance records",
+            "body": "[ ... ]"
+        },
+        "404": {
+            "description": "Employee not found",
+            "body": "{ \"detail\": \"Employee with ID 99 not found\" }"
+        }
+    }
+}
+```
 
-- Or run directly (if `main.py` contains a runnable entrypoint):
-  - `python Backend/main.py`
+### Get Monthly Attendance Stats
 
-## Common workflows
+```api
+{
+    "title": "Get Monthly Attendance Stats",
+    "description": "Returns statistics for a specific year and month, including total records and daily breakdown.",
+    "method": "GET",
+    "baseUrl": "http://localhost:8000",
+    "endpoint": "/attendance/stats/monthly/{year}/{month}",
+    "pathParams": [
+        { "key": "year", "value": "Year", "required": true },
+        { "key": "month", "value": "Month", "required": true }
+    ],
+    "bodyType": "none",
+    "requestBody": "",
+    "responses": {
+        "200": {
+            "description": "Monthly statistics",
+            "body": "{ \"year\": 2024, \"month\": 6, \"total_attendance\": 15, \"unique_employees\": 3, \"daily_breakdown\": [ { \"date\": \"2024-06-12\", \"count\": 5 }, ... ] }"
+        }
+    }
+}
+```
 
-- Recompute embeddings:
-  - Prepare images in `dataset/`, run any dataset cleanup (`fix_dataset_faces.py`), then a script (noted in project) to compute embeddings using `assets/facenet_keras.h5` and store into `assets/embeddings.pkl`.
+### Delete Attendance Record
 
-- Add a new user:
-  - Use an API endpoint (defined in `main.py`/`routes`) or a CLI script to register a new identity and compute/store their embeddings.
+```api
+{
+    "title": "Delete Attendance Record",
+    "description": "Deletes a specific attendance record by ID and returns the deleted record info.",
+    "method": "DELETE",
+    "baseUrl": "http://localhost:8000",
+    "endpoint": "/attendance/{attendance_id}",
+    "pathParams": [
+        { "key": "attendance_id", "value": "Attendance record ID", "required": true }
+    ],
+    "bodyType": "none",
+    "requestBody": "",
+    "responses": {
+        "200": {
+            "description": "Record deleted",
+            "body": "{ \"message\": \"Record successfully deleted\", \"deleted_record\": { ... } }"
+        },
+        "404": {
+            "description": "Not found",
+            "body": "{ \"detail\": \"Attendance record with ID 99 not found\" }"
+        }
+    }
+}
+```
 
-- Run the webcam client:
-  - `python Backend/webcam_client.py` to stream captures to the backend for recognition.
+---
 
-## Notes and best practices
+## 🤳 Face Recognition API (`recognize.py`)
 
-- Keep large model files in `assets/` and do not version them in source control if they exceed repo size limits; use an artifact store or Git LFS.
-- Ensure `Backend/.env` is excluded from VCS (add to `.gitignore`) because it contains DB credentials.
-- Backup `dataset/` before running destructive operations; a backup exists in `dataset_backup_20250613_003430/`.
+Recognizes an uploaded face image using deep learning models and FAISS nearest neighbor search.
 
-## Troubleshooting
+### Recognize Face
 
-- Database connection errors:
-  - Verify `DATABASE_URL` in `Backend/.env` and ensure Postgres is running and accessible.
-- Missing model files:
-  - Ensure `assets/facenet_keras.h5` and `assets/yolov8n-face.pt` are present before running inference.
-- Dependency issues:
-  - Reinstall with `pip install -r Backend/requirements.txt` inside the activated virtual environment.
+```api
+{
+    "title": "Recognize Face",
+    "description": "Detects and recognizes the person in the uploaded image.",
+    "method": "POST",
+    "baseUrl": "http://localhost:8000",
+    "endpoint": "/recognize",
+    "headers": [
+        { "key": "Content-Type", "value": "multipart/form-data", "required": true }
+    ],
+    "formData": [
+        { "key": "file", "value": "The image file (.jpg, .png)", "required": true }
+    ],
+    "bodyType": "form",
+    "responses": {
+        "200": {
+            "description": "Recognition result",
+            "body": "{ \"identity\": \"alice@example.com\", \"confidence\": 0.97 }"
+        },
+        "400": {
+            "description": "No face detected",
+            "body": "{ \"detail\": \"No face detected.\" }"
+        }
+    }
+}
+```
 
-## Summary
+**Usage Example (Python):**
 
-This `Backend` layout supports face detection, embedding generation, storage and an API for attendance operations. The key files to check when debugging are `database.py`, `models.py`, `crud.py`, `main.py`, and the model assets inside `assets/`.
+```python
+import requests
+with open("face.jpg", "rb") as f:
+    resp = requests.post("http://localhost:8000/recognize", files={"file": f})
+print(resp.json())
+```
+
+---
+
+## 🏛 Database & ORM
+
+### Models (`models.py`)
+
+- **Employee**: id, name, email, attendances (relationship)
+- **Attendance**: id, employee_id (FK), employee_name, time_in, image_path
+
+### Schemas (`schema.py`)
+
+- **EmployeeCreate/EmployeeResponse**: Used for employee creation and retrieval
+- **AttendanceCreate/AttendanceResponse/Attendance**: Used for attendance creation/queries
+- **MonthlyAttendanceStats**: Used for statistics endpoints
+
+#### Entity Relationship Diagram
+
+```mermaid
+erDiagram
+    Employee ||--o{ Attendance : has
+    Employee {
+        int id PK
+        string name
+        string email
+    }
+    Attendance {
+        int id PK
+        int employee_id FK
+        string employee_name
+        datetime time_in
+        string image_path
+    }
+```
+
+---
+
+## 🧠 Face Recognition Pipeline
+
+- **Face Detection**: `detection.py` uses YOLOv8 for robust face localization.
+- **Face Preprocessing**: `preprocessing.py`, `utils.py` enhance and normalize faces.
+- **Embedding Extraction**: `recognition.py`, `simple_recognition.py` use FaceNet (PyTorch) to extract 512-d embeddings.
+- **Recognition**: Nearest neighbor search (FAISS) matches embeddings to known identities from `assets/embeddings.pkl`.
+
+#### Data Flow
+
+```mermaid
+flowchart TD
+    A[Uploaded Image] --> B[Face Detection (YOLOv8)]
+    B -->|Face Found| C[Image Preprocessing]
+    C --> D[Embedding Extraction (FaceNet)]
+    D --> E[FAISS Search]
+    E --> F[Prediction Identity + Confidence]
+```
+
+---
+
+## 🛠️ Utilities & Scripts
+
+- **`generate_embeddings.py`**: Generates `embeddings.pkl` from dataset images.
+- **`fix_dataset_faces.py`**: Crops and preprocesses all faces in the dataset for uniformity.
+- **`process_in_place.py`**: In-place enhancement and quality filtering of dataset images.
+- **`super_resolution.py`**: Image upscaling for low-resolution faces.
+- **`webcam_client.py`**: CLI tool for capturing images and registering new users interactively.
+
+---
+
+## ⚡ Setup & Usage
+
+### 1. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Configure Environment
+
+- Edit `.env` to set your `DATABASE_URL`.
+
+### 3. Initialize Database
+
+```bash
+python create_db.py
+```
+
+### 4. (Optional) Prepare Dataset & Generate Embeddings
+
+```bash
+python fix_dataset_faces.py
+python generate_embeddings.py
+```
+
+### 5. Run Backend
+
+```bash
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+---
+
+## 🧪 Example API Usage
+
+### Register a New Employee
+
+```bash
+curl -X POST http://localhost:8000/employees/ \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alice Smith", "email": "alice@example.com"}'
+```
+
+### Mark Attendance
+
+```bash
+curl -X POST http://localhost:8000/attendance/ \
+  -H "Content-Type: application/json" \
+  -d '{"employee_id": 1, "image_path": "uploads/alice_20240612.jpg"}'
+```
+
+### Recognize Face (Image Upload)
+
+```bash
+curl -X POST http://localhost:8000/recognize \
+  -F 'file=@face.jpg'
+```
+
+---
+
+## 📝 Notable Files & Assets
+
+- `assets/class_labels.pkl`: Pickled mapping for class labels.
+- `assets/embeddings.pkl`: Known face embeddings for recognition.
+- `assets/yolov8n-face.pt`: YOLOv8 face detection weights.
+
+---
+
+## ⚠️ Best Practices
+
+```card
+{
+    "title": "Model Files & Security",
+    "content": "Never publish sensitive model weights or database credentials to version control. Use .env for secrets."
+}
+```
+
+---
+
+## 💡 Troubleshooting
+
+- **DB Connection Error**: Verify `.env` and DB server.
+- **Missing Models**: Ensure all required models are in `assets/`.
+- **Recognition Fails**: Check dataset quality and re-generate embeddings if needed.
+
+---
+
+## 🎉 Summary
+
+This backend provides a production-ready, modular, and extensible framework for face-based attendance, supporting robust recognition, secure employee management, and detailed attendance analytics. Extend it for new biometrics, analytics, or workflows as needed!

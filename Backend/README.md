@@ -404,17 +404,6 @@ erDiagram
 - **Embedding Extraction**: `recognition.py`, `simple_recognition.py` use FaceNet (PyTorch) to extract 512-d embeddings.
 - **Recognition**: Nearest neighbor search (FAISS) matches embeddings to known identities from `assets/embeddings.pkl`.
 
-#### Data Flow
-
-```mermaid
-flowchart TD
-    A[Uploaded Image] --> B[Face Detection (YOLOv8)]
-    B -->|Face Found| C[Image Preprocessing]
-    C --> D[Embedding Extraction (FaceNet)]
-    D --> E[FAISS Search]
-    E --> F[Prediction Identity + Confidence]
-```
-
 ---
 
 ## 🛠️ Utilities & Scripts

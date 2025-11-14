@@ -282,5 +282,5 @@ erDiagram
 
 ---
 
-For full API details and advanced configuration, see the subsystem-specific [backend](backend/README.md) and [frontend](frontend/README.md) documentation.  
+For full API details and advanced configuration, see the subsystem-specific [backend](Backend/README.md) and [frontend](frontend/README.md) documentation.  
 This project is ready for production deployment or research extension—**build your next-gen attendance solution today!**
